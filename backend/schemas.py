@@ -125,7 +125,8 @@ class ApprovalResponse(ApprovalBase):
     approver_id: int
     status: ApprovalStatus
     approved_at: Optional[datetime] = None
-    created_at: datetime
+    created_at: datetime               
+    ticket_number: Optional[str] = None                  
     ticket_title: Optional[str] = None
     requester_name: Optional[str] = None
 

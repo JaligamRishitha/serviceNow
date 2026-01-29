@@ -33,6 +33,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Health check endpoint
+@app.get("/health")
+@app.get("/api/health")
+def health_check():
+    """Health check endpoint for container orchestration and MuleSoft"""
+    return {"status": "healthy", "service": "servicenow-backend", "timestamp": datetime.utcnow().isoformat() + "Z"}
+
+
 # Security
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")[:72]  # Truncate to 72 bytes for bcrypt
 ALGORITHM = "HS256"
@@ -303,42 +311,75 @@ def read_ticket(ticket_id: int, db: Session = Depends(get_db), current_user: Use
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    
+
     # Check if user can access this ticket
     if current_user.role == "user" and ticket.requester_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Add names
     if ticket.requester:
         ticket.requester_name = ticket.requester.full_name
     if ticket.assigned_to:
         ticket.assigned_to_name = ticket.assigned_to.full_name
-    
+
+    return ticket
+
+
+@app.get("/tickets/by-number/{ticket_number}", response_model=TicketResponse)
+def read_ticket_by_number(ticket_number: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get a specific ticket by ticket number (for MuleSoft integration)"""
+    ticket = db.query(Ticket).filter(Ticket.ticket_number == ticket_number).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    # Add names
+    if ticket.requester:
+        ticket.requester_name = ticket.requester.full_name
+    if ticket.assigned_to:
+        ticket.assigned_to_name = ticket.assigned_to.full_name
+
     return ticket
 
 @app.put("/tickets/{ticket_id}", response_model=TicketResponse)
-def update_ticket(
-    ticket_id: int, 
-    ticket_update: TicketUpdate, 
-    db: Session = Depends(get_db), 
+async def update_ticket(
+    ticket_id: int,
+    ticket_update: TicketUpdate,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Update a ticket"""
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    
+
     # Check permissions
     if current_user.role == "user" and ticket.requester_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
+    # Store old status to check if it changed
+    old_status = ticket.status
+    ticket_number = ticket.ticket_number
+
     # Update fields
     for field, value in ticket_update.dict(exclude_unset=True).items():
         setattr(ticket, field, value)
-    
+
     db.commit()
     db.refresh(ticket)
-    
+
+    # Notify MuleSoft if status changed to approved or rejected
+    new_status = ticket.status
+    if new_status != old_status and new_status in ["approved", "rejected"]:
+        try:
+            await notify_mulesoft_approval_status(
+                ticket_number=ticket_number,
+                status=new_status,
+                approval_id=0,  # No approval record, using ticket directly
+                comments=ticket_update.resolution_notes
+            )
+        except Exception as e:
+            print(f"MuleSoft notification error (non-blocking): {e}")
+
     return ticket
 
 # Approval endpoints
@@ -362,43 +403,84 @@ def read_approvals(
     for approval in approvals:
         if approval.ticket:
             approval.ticket_title = approval.ticket.title
+            approval.ticket_number = approval.ticket.ticket_number
             if approval.ticket.requester:
                 approval.requester_name = approval.ticket.requester.full_name
     
     return approvals
 
+async def notify_mulesoft_approval_status(ticket_number: str, status: str, approval_id: int, comments: str = None):
+    """Notify MuleSoft about approval status change"""
+    mulesoft_url = os.getenv("MULESOFT_BASE_URL", "http://mulesoft-backend:4797")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            payload = {
+                "ticket_number": ticket_number,
+                "status": status,
+                "approval_id": approval_id,
+                "comments": comments,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "source": "servicenow"
+            }
+            # Try to notify MuleSoft about the approval status change
+            response = await client.post(
+                f"{mulesoft_url}/api/webhooks/servicenow/approval-update",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+            print(f"MuleSoft notification sent: {response.status_code}")
+            return response.status_code in [200, 201, 202]
+    except Exception as e:
+        print(f"Failed to notify MuleSoft: {e}")
+        return False
+
+
 @app.put("/approvals/{approval_id}", response_model=ApprovalResponse)
-def update_approval(
-    approval_id: int, 
-    approval_update: ApprovalUpdate, 
-    db: Session = Depends(get_db), 
+async def update_approval(
+    approval_id: int,
+    approval_update: ApprovalUpdate,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Approve or reject an approval request"""
     approval = db.query(Approval).filter(Approval.id == approval_id).first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
-    
+
     # Check if current user is the approver
     if approval.approver_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     # Update approval
     approval.status = approval_update.status
     approval.comments = approval_update.comments
     if approval_update.status in ["approved", "rejected"]:
         approval.approved_at = datetime.utcnow()
-    
+
     # Update ticket status based on approval
+    ticket_number = None
     if approval.ticket:
+        ticket_number = approval.ticket.ticket_number
         if approval_update.status == "approved":
             approval.ticket.status = "approved"
         elif approval_update.status == "rejected":
             approval.ticket.status = "rejected"
-    
+
     db.commit()
     db.refresh(approval)
-    
+
+    # Notify MuleSoft about the approval status change (async, non-blocking)
+    if ticket_number and approval_update.status in ["approved", "rejected"]:
+        try:
+            await notify_mulesoft_approval_status(
+                ticket_number=ticket_number,
+                status=approval_update.status,
+                approval_id=approval_id,
+                comments=approval_update.comments
+            )
+        except Exception as e:
+            print(f"MuleSoft notification error (non-blocking): {e}")
+
     return approval
 
 @app.get("/dashboard/stats")
