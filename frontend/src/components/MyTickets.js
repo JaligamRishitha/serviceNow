@@ -35,19 +35,24 @@ import {
   Cancel as RejectIcon,
   CheckCircle
 } from '@mui/icons-material';
+import { useAuth } from '../contexts/AuthContext';
+
+const MULESOFT_URL = "http://149.102.158.71:4797";
 
 const MyTickets = () => {
   const navigate = useNavigate();
+  const { API_URL } = useAuth();
   const [searchParams] = useSearchParams();
   const [tickets, setTickets] = useState([]);
-  const [approvals, setApprovals] = useState([]);
+  const [pendingApprovalTickets, setPendingApprovalTickets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [showTicketDialog, setShowTicketDialog] = useState(false);
   const [showApprovalDialog, setShowApprovalDialog] = useState(false);
-  const [selectedApproval, setSelectedApproval] = useState(null);
+  const [selectedApprovalTicket, setSelectedApprovalTicket] = useState(null);
   const [approvalComments, setApprovalComments] = useState('');
   const [tabValue, setTabValue] = useState(0);
+  const [actionLoading, setActionLoading] = useState(null);
 
   useEffect(() => {
     // Check URL parameter for tab selection
@@ -61,20 +66,20 @@ const MyTickets = () => {
 
   useEffect(() => {
     fetchTickets();
-    fetchApprovals();
-  }, []);
+    fetchPendingApprovalTickets();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchTickets = async () => {
     try {
       const token = localStorage.getItem('token');
       console.log('Fetching tickets with token:', token ? 'Token exists' : 'No token');
-      
-      const response = await fetch('http://localhost:8002/tickets/?my_tickets=true', {
+
+      const response = await fetch(`${API_URL}/tickets/?my_tickets=true`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
       });
-      
+
       console.log('Tickets response status:', response.status);
       const data = await response.json();
       console.log('Tickets data received:', data);
@@ -86,23 +91,63 @@ const MyTickets = () => {
     }
   };
 
-  const fetchApprovals = async () => {
+  const fetchPendingApprovalTickets = async () => {
     try {
       const token = localStorage.getItem('token');
-      console.log('Fetching approvals with token:', token ? 'Token exists' : 'No token');
-      
-      const response = await fetch('http://localhost:8002/approvals/', {
+      console.log('Fetching pending approval tickets');
+
+      // Fetch all tickets with pending_approval status
+      const response = await fetch(`${API_URL}/tickets/?status=pending_approval`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
       });
-      
-      console.log('Approvals response status:', response.status);
+
+      console.log('Pending approval tickets response status:', response.status);
       const data = await response.json();
-      console.log('Approvals data received:', data);
-      setApprovals(data);
+      console.log('Pending approval tickets received:', data);
+      setPendingApprovalTickets(data);
     } catch (error) {
-      console.error('Error fetching approvals:', error);
+      console.error('Error fetching pending approval tickets:', error);
+    }
+  };
+
+  // Send notification to MuleSoft
+  const notifyMuleSoft = async (ticket, action, comments) => {
+    try {
+      const payload = {
+        ticket_id: ticket.id,
+        ticket_number: ticket.ticket_number,
+        title: ticket.title,
+        description: ticket.description,
+        status: action, // 'approved' or 'rejected'
+        action_taken: action,
+        comments: comments,
+        action_timestamp: new Date().toISOString(),
+        category: ticket.category,
+        subcategory: ticket.subcategory,
+        priority: ticket.priority,
+        requester_name: ticket.requester_name
+      };
+
+      console.log('Sending to MuleSoft:', payload);
+
+      const response = await fetch(`${MULESOFT_URL}/api/ticket-approval`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (response.ok) {
+        console.log('MuleSoft notification sent successfully');
+      } else {
+        console.error('MuleSoft notification failed:', response.status);
+      }
+    } catch (error) {
+      console.error('Error sending to MuleSoft:', error);
+      // Don't throw - we don't want to fail the approval if MuleSoft is unreachable
     }
   };
 
@@ -146,38 +191,83 @@ const MyTickets = () => {
     setShowTicketDialog(true);
   };
 
-  const handleApproval = (approval) => {
-    setSelectedApproval(approval);
+  const handleApprovalAction = (ticket) => {
+    setSelectedApprovalTicket(ticket);
     setApprovalComments('');
     setShowApprovalDialog(true);
   };
 
-  const submitApproval = async (status) => {
+  // Direct approve/reject from table (without dialog)
+  const handleDirectAction = async (ticket, action) => {
+    setActionLoading(ticket.id);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`http://localhost:8002/approvals/${selectedApproval.id}`, {
+      const newStatus = action === 'approve' ? 'approved' : 'rejected';
+
+      // Update ticket status
+      const response = await fetch(`${API_URL}/tickets/${ticket.id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          status: status,
-          comments: approvalComments
+          status: newStatus
         })
       });
 
       if (response.ok) {
-        setShowApprovalDialog(false);
-        fetchApprovals();
-        fetchTickets(); // Refresh tickets to show updated status
-        alert(`Approval ${status} successfully!`);
+        // Send notification to MuleSoft
+        await notifyMuleSoft(ticket, newStatus, '');
+
+        // Refresh data
+        fetchPendingApprovalTickets();
+        fetchTickets();
+        alert(`Ticket ${newStatus} successfully!`);
       } else {
-        throw new Error('Failed to update approval');
+        throw new Error('Failed to update ticket');
       }
     } catch (error) {
-      console.error('Error updating approval:', error);
-      alert('Error updating approval. Please try again.');
+      console.error('Error updating ticket:', error);
+      alert('Error updating ticket. Please try again.');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // Submit approval from dialog (with comments)
+  const submitApproval = async (action) => {
+    try {
+      const token = localStorage.getItem('token');
+      const newStatus = action === 'approve' ? 'approved' : 'rejected';
+
+      // Update ticket status
+      const response = await fetch(`${API_URL}/tickets/${selectedApprovalTicket.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          status: newStatus,
+          resolution_notes: approvalComments || undefined
+        })
+      });
+
+      if (response.ok) {
+        // Send notification to MuleSoft
+        await notifyMuleSoft(selectedApprovalTicket, newStatus, approvalComments);
+
+        setShowApprovalDialog(false);
+        fetchPendingApprovalTickets();
+        fetchTickets();
+        alert(`Ticket ${newStatus} successfully!`);
+      } else {
+        throw new Error('Failed to update ticket');
+      }
+    } catch (error) {
+      console.error('Error updating ticket:', error);
+      alert('Error updating ticket. Please try again.');
     }
   };
 
@@ -206,17 +296,17 @@ const MyTickets = () => {
           >
             Home
           </Link>
-          <Typography color="text.primary">My Tickets</Typography>
+          <Typography color="text.primary">Tickets</Typography>
         </Breadcrumbs>
         
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
           <Typography variant="h4" sx={{ color: '#333', fontWeight: 600 }}>
-            My Tickets & Approvals
+            Tickets & Approvals
           </Typography>
           <Button
             variant="outlined"
             startIcon={<RefreshIcon />}
-            onClick={() => { fetchTickets(); fetchApprovals(); }}
+            onClick={() => { fetchTickets(); fetchPendingApprovalTickets(); }}
             sx={{ borderColor: '#FF8C42', color: '#FF8C42' }}
           >
             Refresh
@@ -264,7 +354,7 @@ const MyTickets = () => {
               <CardContent sx={{ textAlign: 'center' }}>
                 <ApproveIcon sx={{ fontSize: 40, color: '#4CAF50', mb: 1 }} />
                 <Typography variant="h4" sx={{ fontWeight: 600, color: '#333' }}>
-                  {approvals.filter(a => a.status === 'pending').length}
+                  {pendingApprovalTickets.length}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   Pending Approvals
@@ -290,17 +380,17 @@ const MyTickets = () => {
 
         {/* Tabs */}
         <Paper sx={{ mb: 3 }}>
-          <Tabs 
-            value={tabValue} 
+          <Tabs
+            value={tabValue}
             onChange={handleTabChange}
             sx={{ borderBottom: 1, borderColor: 'divider' }}
           >
-            <Tab label={`My Tickets (${tickets.length})`} />
-            <Tab label={`My Approvals (${approvals.length})`} />
+            <Tab label={`Tickets (${tickets.length})`} />
+            <Tab label={`Approvals (${pendingApprovalTickets.length})`} />
           </Tabs>
         </Paper>
 
-        {/* My Tickets Tab */}
+        {/* Tickets Tab */}
         {tabValue === 0 && (
           <Paper>
             <TableContainer>
@@ -384,69 +474,105 @@ const MyTickets = () => {
           </Paper>
         )}
 
-        {/* My Approvals Tab */}
+        {/* Approvals Tab */}
         {tabValue === 1 && (
           <Paper>
             <TableContainer>
               <Table>
                 <TableHead>
                   <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
-                    <TableCell><strong>Ticket</strong></TableCell>
+                    <TableCell><strong>Ticket #</strong></TableCell>
+                    <TableCell><strong>Title</strong></TableCell>
+                    <TableCell><strong>Category</strong></TableCell>
+                    <TableCell><strong>Priority</strong></TableCell>
                     <TableCell><strong>Requester</strong></TableCell>
-                    <TableCell><strong>Status</strong></TableCell>
-                    <TableCell><strong>Requested</strong></TableCell>
+                    <TableCell><strong>Created</strong></TableCell>
                     <TableCell><strong>Actions</strong></TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {approvals.length === 0 ? (
+                  {pendingApprovalTickets.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} sx={{ textAlign: 'center', py: 4 }}>
+                      <TableCell colSpan={7} sx={{ textAlign: 'center', py: 4 }}>
                         <Typography color="text.secondary">
-                          No approval requests found.
+                          No pending approval requests found.
                         </Typography>
                       </TableCell>
                     </TableRow>
                   ) : (
-                    approvals.map((approval) => (
-                      <TableRow key={approval.id} hover>
+                    pendingApprovalTickets.map((ticket) => (
+                      <TableRow key={ticket.id} hover>
+                        <TableCell>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace', color: '#8B1538' }}>
+                            {ticket.ticket_number}
+                          </Typography>
+                        </TableCell>
                         <TableCell>
                           <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                            {approval.ticket_title}
+                            {ticket.title}
                           </Typography>
                         </TableCell>
                         <TableCell>
                           <Typography variant="body2">
-                            {approval.requester_name}
+                            {ticket.category || '-'}
                           </Typography>
                         </TableCell>
                         <TableCell>
-                          <Chip 
-                            label={approval.status} 
-                            size="small" 
-                            color={getStatusColor(approval.status)}
+                          <Chip
+                            label={ticket.priority}
+                            size="small"
+                            color={getPriorityColor(ticket.priority)}
                           />
                         </TableCell>
                         <TableCell>
-                          <Typography variant="body2" color="text.secondary">
-                            {formatDate(approval.created_at)}
+                          <Typography variant="body2">
+                            {ticket.requester_name || '-'}
                           </Typography>
                         </TableCell>
                         <TableCell>
-                          {approval.status === 'pending' ? (
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              onClick={() => handleApproval(approval)}
-                              sx={{ borderColor: '#FF8C42', color: '#FF8C42' }}
-                            >
-                              Review
-                            </Button>
-                          ) : (
-                            <Typography variant="body2" color="text.secondary">
-                              {approval.status === 'approved' ? 'Approved' : 'Rejected'}
-                            </Typography>
-                          )}
+                          <Typography variant="body2" color="text.secondary">
+                            {formatDate(ticket.created_at)}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            <Tooltip title="Approve">
+                              <IconButton
+                                size="small"
+                                onClick={() => handleDirectAction(ticket, 'approve')}
+                                disabled={actionLoading === ticket.id}
+                                sx={{
+                                  color: '#4CAF50',
+                                  '&:hover': { backgroundColor: '#E8F5E9' }
+                                }}
+                              >
+                                <ApproveIcon />
+                              </IconButton>
+                            </Tooltip>
+                            <Tooltip title="Reject">
+                              <IconButton
+                                size="small"
+                                onClick={() => handleDirectAction(ticket, 'reject')}
+                                disabled={actionLoading === ticket.id}
+                                sx={{
+                                  color: '#f44336',
+                                  '&:hover': { backgroundColor: '#FFEBEE' }
+                                }}
+                              >
+                                <RejectIcon />
+                              </IconButton>
+                            </Tooltip>
+                            <Tooltip title="View Details & Add Comments">
+                              <IconButton
+                                size="small"
+                                onClick={() => handleApprovalAction(ticket)}
+                                disabled={actionLoading === ticket.id}
+                                sx={{ color: '#FF8C42' }}
+                              >
+                                <ViewIcon />
+                              </IconButton>
+                            </Tooltip>
+                          </Box>
                         </TableCell>
                       </TableRow>
                     ))
@@ -520,51 +646,99 @@ const MyTickets = () => {
       </Dialog>
 
       {/* Approval Dialog */}
-      <Dialog 
-        open={showApprovalDialog} 
+      <Dialog
+        open={showApprovalDialog}
         onClose={() => setShowApprovalDialog(false)}
-        maxWidth="sm"
+        maxWidth="md"
         fullWidth
       >
-        {selectedApproval && (
+        {selectedApprovalTicket && (
           <>
             <DialogTitle>
-              Approval Request
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Typography variant="h6">
+                  Approval Request - {selectedApprovalTicket.ticket_number}
+                </Typography>
+                <Chip
+                  label="Pending Approval"
+                  size="small"
+                  color="warning"
+                />
+              </Box>
             </DialogTitle>
             <DialogContent>
-              <Typography variant="h6" sx={{ mb: 2 }}>
-                {selectedApproval.ticket_title}
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                Requested by: {selectedApproval.requester_name}
-              </Typography>
-              
-              <TextField
-                fullWidth
-                multiline
-                rows={3}
-                label="Comments (optional)"
-                value={approvalComments}
-                onChange={(e) => setApprovalComments(e.target.value)}
-                sx={{ mt: 2 }}
-              />
+              <Grid container spacing={2} sx={{ mt: 1 }}>
+                <Grid item xs={12}>
+                  <Typography variant="h6" sx={{ mb: 1 }}>
+                    {selectedApprovalTicket.title}
+                  </Typography>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Typography variant="subtitle2" color="text.secondary">Requester</Typography>
+                  <Typography variant="body1">{selectedApprovalTicket.requester_name || '-'}</Typography>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Typography variant="subtitle2" color="text.secondary">Priority</Typography>
+                  <Chip label={selectedApprovalTicket.priority} size="small" color={getPriorityColor(selectedApprovalTicket.priority)} />
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Typography variant="subtitle2" color="text.secondary">Category</Typography>
+                  <Typography variant="body1">{selectedApprovalTicket.category || '-'}</Typography>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Typography variant="subtitle2" color="text.secondary">Created</Typography>
+                  <Typography variant="body1">{formatDate(selectedApprovalTicket.created_at)}</Typography>
+                </Grid>
+                <Grid item xs={12}>
+                  <Typography variant="subtitle2" color="text.secondary">Description</Typography>
+                  <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', backgroundColor: '#f5f5f5', p: 2, borderRadius: 1 }}>
+                    {selectedApprovalTicket.description}
+                  </Typography>
+                </Grid>
+                {selectedApprovalTicket.business_justification && (
+                  <Grid item xs={12}>
+                    <Typography variant="subtitle2" color="text.secondary">Business Justification</Typography>
+                    <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
+                      {selectedApprovalTicket.business_justification}
+                    </Typography>
+                  </Grid>
+                )}
+                {selectedApprovalTicket.estimated_cost && (
+                  <Grid item xs={12} md={6}>
+                    <Typography variant="subtitle2" color="text.secondary">Estimated Cost</Typography>
+                    <Typography variant="body1">{selectedApprovalTicket.estimated_cost}</Typography>
+                  </Grid>
+                )}
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    multiline
+                    rows={3}
+                    label="Comments (optional)"
+                    value={approvalComments}
+                    onChange={(e) => setApprovalComments(e.target.value)}
+                    placeholder="Add any comments for this approval decision..."
+                  />
+                </Grid>
+              </Grid>
             </DialogContent>
-            <DialogActions>
-              <Button 
+            <DialogActions sx={{ p: 2, gap: 1 }}>
+              <Button
                 onClick={() => setShowApprovalDialog(false)}
                 color="inherit"
               >
                 Cancel
               </Button>
-              <Button 
-                onClick={() => submitApproval('rejected')}
+              <Button
+                onClick={() => submitApproval('reject')}
                 color="error"
+                variant="outlined"
                 startIcon={<RejectIcon />}
               >
                 Reject
               </Button>
-              <Button 
-                onClick={() => submitApproval('approved')}
+              <Button
+                onClick={() => submitApproval('approve')}
                 color="success"
                 startIcon={<ApproveIcon />}
                 variant="contained"

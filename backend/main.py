@@ -8,6 +8,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
 import hashlib
+import httpx
 
 from database import SessionLocal, engine, Base
 from models import User, Incident, ServiceCatalogItem, KnowledgeArticle, Ticket, Approval, IncidentStatus, IncidentPriority, TicketStatus, ApprovalStatus
@@ -26,7 +27,7 @@ app = FastAPI(title="ServiceNow Clone API", version="1.0.0")
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3003"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -159,27 +160,33 @@ def read_service_catalog(db: Session = Depends(get_db), current_user: User = Dep
 # Knowledge Base endpoints
 @app.get("/knowledge-base/", response_model=list[KnowledgeArticleResponse])
 def read_knowledge_articles(
-    skip: int = 0, 
-    limit: int = 100, 
+    skip: int = 0,
+    limit: int = 100,
     category: str = None,
     search: str = None,
     db: Session = Depends(get_db)
 ):
     """Get knowledge base articles with optional filtering"""
     query = db.query(KnowledgeArticle)
-    
+
     if category:
         query = query.filter(KnowledgeArticle.category == category)
-    
+
     if search:
         query = query.filter(
-            KnowledgeArticle.title.contains(search) | 
+            KnowledgeArticle.title.contains(search) |
             KnowledgeArticle.content.contains(search) |
             KnowledgeArticle.tags.contains(search)
         )
-    
+
     articles = query.offset(skip).limit(limit).all()
     return articles
+
+@app.get("/knowledge-base/categories/")
+def get_knowledge_categories(db: Session = Depends(get_db)):
+    """Get all knowledge base categories"""
+    categories = db.query(KnowledgeArticle.category).distinct().all()
+    return [{"name": cat[0]} for cat in categories if cat[0]]
 
 @app.get("/knowledge-base/{article_id}", response_model=KnowledgeArticleResponse)
 def read_knowledge_article(article_id: int, db: Session = Depends(get_db)):
@@ -187,12 +194,12 @@ def read_knowledge_article(article_id: int, db: Session = Depends(get_db)):
     article = db.query(KnowledgeArticle).filter(KnowledgeArticle.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
-    
+
     # Increment view count
     article.views += 1
     db.commit()
     db.refresh(article)
-    
+
     return article
 
 @app.post("/knowledge-base/{article_id}/helpful")
@@ -201,17 +208,11 @@ def mark_article_helpful(article_id: int, db: Session = Depends(get_db)):
     article = db.query(KnowledgeArticle).filter(KnowledgeArticle.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
-    
+
     article.helpful_votes += 1
     db.commit()
-    
-    return {"message": "Thank you for your feedback!"}
 
-@app.get("/knowledge-base/categories/")
-def get_knowledge_categories(db: Session = Depends(get_db)):
-    """Get all knowledge base categories"""
-    categories = db.query(KnowledgeArticle.category).distinct().all()
-    return [{"name": cat[0]} for cat in categories if cat[0]]
+    return {"message": "Thank you for your feedback!"}
 
 # Ticket Management endpoints
 @app.post("/tickets/", response_model=TicketResponse)
@@ -1196,92 +1197,8 @@ Solutions for common Microsoft Teams problems during meetings and calls.
                 db.add(article)
             db.commit()
             print("Created sample knowledge base articles")
-        
-        # Create sample tickets
-        if not db.query(Ticket).first():
-            import random
-            sample_tickets = [
-                Ticket(
-                    ticket_number=f"TKT{random.randint(100000, 999999)}",
-                    title="Password Reset Request",
-                    description="I forgot my password and cannot access my email account. Please help me reset it.",
-                    ticket_type="incident",
-                    status="submitted",
-                    priority="medium",
-                    category="Account Management",
-                    subcategory="Password Reset",
-                    requester_id=admin_user.id,
-                    contact_number="555-0123",
-                    preferred_contact="email"
-                ),
-                Ticket(
-                    ticket_number=f"TKT{random.randint(100000, 999999)}",
-                    title="New Laptop Request",
-                    description="I need a new laptop for my work. My current one is very slow and affecting productivity.",
-                    ticket_type="service_request",
-                    status="pending_approval",
-                    priority="medium",
-                    category="Hardware",
-                    subcategory="New Equipment",
-                    requester_id=admin_user.id,
-                    business_justification="Current laptop is 5 years old and cannot run required software efficiently",
-                    estimated_cost="$1200"
-                ),
-                Ticket(
-                    ticket_number=f"TKT{random.randint(100000, 999999)}",
-                    title="Printer Not Working",
-                    description="The printer on the 3rd floor is not responding. It shows an error message and won't print anything.",
-                    ticket_type="incident",
-                    status="in_progress",
-                    priority="high",
-                    category="Hardware",
-                    subcategory="Printer Issues",
-                    requester_id=admin_user.id,
-                    contact_number="555-0124"
-                ),
-                Ticket(
-                    ticket_number=f"TKT{random.randint(100000, 999999)}",
-                    title="Software Installation - Adobe Creative Suite",
-                    description="I need Adobe Creative Suite installed on my workstation for design work.",
-                    ticket_type="service_request",
-                    status="approved",
-                    priority="low",
-                    category="Software",
-                    subcategory="Installation",
-                    requester_id=admin_user.id,
-                    business_justification="Required for marketing materials creation",
-                    estimated_cost="$600"
-                ),
-                Ticket(
-                    ticket_number=f"TKT{random.randint(100000, 999999)}",
-                    title="VPN Connection Issues",
-                    description="I cannot connect to the company VPN from home. Getting authentication errors.",
-                    ticket_type="incident",
-                    status="resolved",
-                    priority="medium",
-                    category="Network",
-                    subcategory="VPN",
-                    requester_id=admin_user.id,
-                    resolution_notes="Reset VPN credentials and updated client software. Issue resolved."
-                )
-            ]
-            
-            for ticket in sample_tickets:
-                db.add(ticket)
-            db.commit()
-            
-            # Create sample approvals for tickets that need approval
-            approval_tickets = [t for t in sample_tickets if t.status == "pending_approval"]
-            for ticket in approval_tickets:
-                approval = Approval(
-                    ticket_id=ticket.id,
-                    approver_id=admin_user.id,
-                    status="pending"
-                )
-                db.add(approval)
-            
-            db.commit()
-            print("Created sample tickets and approvals")
+
+        # No sample tickets or approvals - users will create their own
     except Exception as e:
         print(f"Startup error: {e}")
     finally:

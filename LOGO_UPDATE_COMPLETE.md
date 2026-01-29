@@ -68,7 +68,7 @@ frontend/
 
 ### Header Layout
 ```
-[ServiceNow Logo] [Workplace ▼] [IT ▼] ... [My Approvals] [My Tickets] [User Menu]
+[ServiceNow Logo] [Workplace ▼] [IT ▼] ... [Approvals] [Tickets] [User Menu]
 ```
 
 ### Logo Specifications

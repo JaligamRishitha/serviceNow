@@ -35,7 +35,7 @@ Successfully implemented a comprehensive ticket management system with approval 
 4. **Decision**: Approve/reject with optional comments
 5. **Update**: Ticket status automatically updated based on decision
 
-## 📊 My Tickets Dashboard
+## 📊 Tickets Dashboard
 
 ### Dashboard Features
 - **Summary Cards**: Visual overview of ticket statistics
@@ -124,7 +124,7 @@ approvals:
 - **Status Indicators**: Color-coded chips for quick visual reference
 
 ### Navigation Integration
-- **Workplace Menu**: "My Tickets" prominently placed
+- **Workplace Menu**: "Tickets" prominently placed
 - **Breadcrumb Navigation**: Clear path indication
 - **Direct Access**: URL routing for bookmarking
 
@@ -149,12 +149,12 @@ approvals:
 
 ### For End Users
 1. **Create Tickets**: Use service request forms on homepage
-2. **Track Progress**: Go to Workplace > My Tickets
+2. **Track Progress**: Go to Workplace > Tickets
 3. **View Details**: Click on any ticket for full information
 4. **Monitor Status**: Watch tickets progress through workflow
 
 ### For Managers/Approvers
-1. **Review Requests**: Go to My Tickets > My Approvals tab
+1. **Review Requests**: Go to Tickets > Approvals tab
 2. **Evaluate Requests**: Review business justification and costs
 3. **Make Decisions**: Approve/reject with optional comments
 4. **Track Outcomes**: See how decisions affect ticket status
@@ -196,7 +196,7 @@ approvals:
 
 ### Navigation Integration
 - **Homepage Cards** → Direct links to ticket creation
-- **Navbar Menu** → Quick access to My Tickets
+- **Navbar Menu** → Quick access to Tickets
 - **Breadcrumbs** → Clear navigation paths
 
 ### Workflow Integration
@@ -210,7 +210,7 @@ The ServiceNow ticket management and approval system is fully implemented and re
 
 **Key Achievements:**
 - ✅ Complete ticket creation from service forms
-- ✅ Comprehensive My Tickets dashboard
+- ✅ Comprehensive Tickets dashboard
 - ✅ Full approval workflow system
 - ✅ Role-based access control
 - ✅ Professional ServiceNow styling

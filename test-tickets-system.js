@@ -4,7 +4,7 @@ const testTicketSystem = () => {
   
   console.log('✅ Ticket Management Features Implemented:');
   console.log('📝 Complete ticket creation from service request forms');
-  console.log('📋 My Tickets dashboard with comprehensive view');
+  console.log('📋 Tickets dashboard with comprehensive view');
   console.log('👥 Approval workflow system');
   console.log('🔍 Ticket filtering and search capabilities');
   console.log('📊 Ticket status tracking and analytics');
@@ -48,9 +48,9 @@ const testTicketSystem = () => {
   console.log('GET /approvals/ - List pending approvals');
   console.log('PUT /approvals/{id} - Approve/reject requests');
   
-  console.log('\n📊 My Tickets Dashboard Features:');
+  console.log('\n📊 Tickets Dashboard Features:');
   console.log('📈 Summary cards showing ticket statistics');
-  console.log('📋 Tabbed interface: My Tickets | My Approvals');
+  console.log('📋 Tabbed interface: Tickets | Approvals');
   console.log('🔍 Ticket details modal with full information');
   console.log('✅ Approval interface with approve/reject actions');
   console.log('🏷️  Status and priority color coding');
@@ -60,8 +60,8 @@ const testTicketSystem = () => {
   console.log('\n🌐 Access Ticket System:');
   console.log('1. Open http://localhost:3003 in your browser');
   console.log('2. Login with: admin@company.com / admin123');
-  console.log('3. Navigate to My Tickets via:');
-  console.log('   - Top navigation: Workplace > My Tickets');
+  console.log('3. Navigate to Tickets via:');
+  console.log('   - Top navigation: Workplace > Tickets');
   console.log('   - Direct URL: http://localhost:3003/my-tickets');
   
   console.log('\n🧪 Test Ticket Creation:');
@@ -70,11 +70,11 @@ const testTicketSystem = () => {
   console.log('   - "Got a problem?"');
   console.log('   - "Need help with a business application?"');
   console.log('2. Fill out forms and submit');
-  console.log('3. Check My Tickets to see new tickets');
+  console.log('3. Check Tickets to see new tickets');
   console.log('4. Test approval workflow for high-cost requests');
   
   console.log('\n🧪 Test Approval System:');
-  console.log('1. Go to My Tickets > My Approvals tab');
+  console.log('1. Go to Tickets > Approvals tab');
   console.log('2. Click "Review" on pending approvals');
   console.log('3. Add comments and approve/reject');
   console.log('4. Verify ticket status updates');

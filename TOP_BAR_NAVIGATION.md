@@ -33,8 +33,8 @@
   - LSafety
 
 #### Right Section (unchanged)
-- My Approvals
-- My Tickets
+- Approvals
+- Tickets
 - Favorite icon
 - Settings icon
 - User menu with avatar and dropdown
@@ -63,7 +63,7 @@
 
 #### Navigation Structure
 ```
-Logo | Workplace ▼ | IT ▼ | My FM | Our Procurement | LSafety | ... | My Approvals | My Tickets | ♥ | ⚙ | User ▼
+Logo | Workplace ▼ | IT ▼ | My FM | Our Procurement | LSafety | ... | Approvals | Tickets | ♥ | ⚙ | User ▼
 ```
 
 ### 🔧 Technical Changes

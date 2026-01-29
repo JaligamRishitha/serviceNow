@@ -40,7 +40,7 @@ const Incidents = () => {
 
   useEffect(() => {
     fetchIncidents();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchIncidents = async () => {
     try {

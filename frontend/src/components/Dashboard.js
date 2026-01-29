@@ -43,7 +43,7 @@ import { useAuth } from '../contexts/AuthContext';
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, API_URL } = useAuth();
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     totalIncidents: 0,
@@ -66,7 +66,7 @@ const Dashboard = () => {
       const headers = { 'Authorization': `Bearer ${token}` };
 
       // Use the optimized dashboard endpoint
-      const response = await fetch('http://localhost:8002/dashboard/stats', { headers });
+      const response = await fetch(`${API_URL}/dashboard/stats`, { headers });
       const data = await response.json();
 
       setStats(data.stats);
@@ -79,9 +79,9 @@ const Dashboard = () => {
       // Fallback to original method if new endpoint fails
       try {
         const [incidentsResponse, ticketsResponse, approvalsResponse] = await Promise.all([
-          fetch('http://localhost:8002/incidents/', { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }),
-          fetch('http://localhost:8002/tickets/?my_tickets=true', { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }),
-          fetch('http://localhost:8002/approvals/', { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } })
+          fetch(`${API_URL}/incidents/`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }),
+          fetch(`${API_URL}/tickets/?my_tickets=true`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }),
+          fetch(`${API_URL}/approvals/`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } })
         ]);
 
         const [incidentsData, ticketsData, approvalsData] = await Promise.all([
@@ -136,7 +136,7 @@ const Dashboard = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [API_URL]);
 
   useEffect(() => {
     fetchDashboardData();
@@ -215,7 +215,7 @@ const Dashboard = () => {
         <Grid container spacing={3} sx={{ mb: 4 }}>
           <Grid item xs={12} sm={6} md={3}>
             <StatCard
-              title="My Tickets"
+              title="Tickets"
               value={stats.totalTickets}
               icon={<TicketIcon />}
               color="#FF8C42"

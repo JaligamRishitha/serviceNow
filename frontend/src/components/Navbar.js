@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -152,7 +153,7 @@ const Navbar = () => {
               '&:hover': { backgroundColor: 'rgba(255,140,66,0.04)' }
             }}
           >
-            My Approvals
+            Approvals
           </Button>
 
           <Button
@@ -164,7 +165,7 @@ const Navbar = () => {
               '&:hover': { backgroundColor: 'rgba(255,140,66,0.04)' }
             }}
           >
-            My Tickets
+            Tickets
           </Button>
 
           <Button

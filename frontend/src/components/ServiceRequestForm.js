@@ -22,6 +22,7 @@ import {
   Favorite as FavoriteIcon,
   CloudUpload as CloudUploadIcon
 } from '@mui/icons-material';
+import { useAuth } from '../contexts/AuthContext';
 
 const ServiceRequestForm = ({ 
   title, 
@@ -30,7 +31,8 @@ const ServiceRequestForm = ({
   onSubmit 
 }) => {
   const navigate = useNavigate();
-  
+  const { API_URL } = useAuth();
+
   const [formData, setFormData] = useState({
     category: '',
     subcategory: '',
@@ -105,7 +107,7 @@ const ServiceRequestForm = ({
         priority: data.urgency === 'high' ? 'high' : data.urgency === 'low' ? 'low' : 'medium'
       };
 
-      const response = await fetch('http://localhost:8002/tickets/', {
+      const response = await fetch(`${API_URL}/tickets/`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -116,7 +118,7 @@ const ServiceRequestForm = ({
 
       if (response.ok) {
         const ticket = await response.json();
-        alert(`Ticket ${ticket.ticket_number} created successfully! You can track its progress in My Tickets.`);
+        alert(`Ticket ${ticket.ticket_number} created successfully! You can track its progress in Tickets.`);
         navigate('/');
       } else {
         throw new Error('Failed to create ticket');

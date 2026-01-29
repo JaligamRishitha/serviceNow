@@ -13,8 +13,8 @@
   - LSafety
 
 ### Right Side Features
-- **My Approvals** button (red text)
-- **My Tickets** button (red text)
+- **Approvals** button (red text)
+- **Tickets** button (red text)
 - **Favorite icon** (heart icon in red)
 - **Settings icon**
 - **User menu** with avatar, name, and dropdown containing:

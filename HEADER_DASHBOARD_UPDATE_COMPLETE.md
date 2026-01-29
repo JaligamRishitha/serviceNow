@@ -12,7 +12,7 @@ Successfully updated the header navigation buttons to use orange color and enhan
 
 ### Visual Impact
 ```
-[ServiceNow Logo] [Workplace ▼] [IT ▼] ... [My Approvals] [My Tickets] [User Menu]
+[ServiceNow Logo] [Workplace ▼] [IT ▼] ... [Approvals] [Tickets] [User Menu]
                    ↑ Orange      ↑ Orange
 ```
 
@@ -42,7 +42,7 @@ sx={{
 ### Dashboard Sections
 
 #### 1. Main Statistics (Top Row)
-- **My Tickets**: Total user tickets with navigation to My Tickets
+- **Tickets**: Total user tickets with navigation to Tickets
 - **Open Tickets**: Active tickets requiring attention
 - **Pending Approvals**: Approvals awaiting decision
 - **Resolved Tickets**: Completed tickets

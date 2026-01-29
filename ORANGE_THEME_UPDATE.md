@@ -32,8 +32,8 @@
 ### 🔝 **Navigation Bar Colors**
 
 #### **Action Buttons**
-- **My Approvals**: #FF8C42 (Orange theme)
-- **My Tickets**: #FF8C42 (Orange theme)
+- **Approvals**: #FF8C42 (Orange theme)
+- **Tickets**: #FF8C42 (Orange theme)
 - **Favorite icon**: #FF8C42 (Orange theme)
 - **User avatar**: #FF8C42 (Orange background)
 
@@ -65,7 +65,7 @@
 - ✅ Professional color distribution
 
 #### **Navigation**
-- ✅ Orange action buttons (My Approvals, My Tickets)
+- ✅ Orange action buttons (Approvals, Tickets)
 - ✅ Orange favorite icon
 - ✅ Orange user avatar
 - ✅ Authentic ServiceNow logo maintained

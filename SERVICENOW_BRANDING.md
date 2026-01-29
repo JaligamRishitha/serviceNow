@@ -26,7 +26,7 @@
 
 ### 🌈 **Component Color Scheme**
 - **Navigation Links**: Dark gray (#2c3e50) for professional look
-- **Action Buttons**: ServiceNow green (#62d84e) for "My Approvals", "My Tickets"
+- **Action Buttons**: ServiceNow green (#62d84e) for "Approvals", "Tickets"
 - **Favorite Icon**: ServiceNow green for brand consistency
 - **User Avatar**: ServiceNow green background
 - **Hero Section**: ServiceNow green gradient

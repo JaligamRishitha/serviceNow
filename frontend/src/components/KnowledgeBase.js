@@ -35,9 +35,11 @@ import {
   Print as PrintIcon,
   BookmarkBorder as BookmarkIcon
 } from '@mui/icons-material';
+import { useAuth } from '../contexts/AuthContext';
 
 const KnowledgeBase = () => {
   const navigate = useNavigate();
+  const { API_URL } = useAuth();
   const { articleId } = useParams();
   const [articles, setArticles] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -53,7 +55,7 @@ const KnowledgeBase = () => {
       if (searchQuery) params.append('search', searchQuery);
       if (selectedCategory) params.append('category', selectedCategory);
       
-      const response = await fetch(`http://localhost:8002/knowledge-base/?${params}`);
+      const response = await fetch(`${API_URL}/knowledge-base/?${params}`);
       const data = await response.json();
       setArticles(data);
     } catch (error) {
@@ -61,22 +63,22 @@ const KnowledgeBase = () => {
     } finally {
       setLoading(false);
     }
-  }, [searchQuery, selectedCategory]);
+  }, [searchQuery, selectedCategory, API_URL]);
 
   useEffect(() => {
     fetchArticles();
     fetchCategories();
-  }, [fetchArticles]);
+  }, [fetchArticles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (articleId) {
       fetchArticle(articleId);
     }
-  }, [articleId]);
+  }, [articleId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchCategories = async () => {
     try {
-      const response = await fetch('http://localhost:8002/knowledge-base/categories/');
+      const response = await fetch(`${API_URL}/knowledge-base/categories/`);
       const data = await response.json();
       setCategories(data);
     } catch (error) {
@@ -86,7 +88,7 @@ const KnowledgeBase = () => {
 
   const fetchArticle = async (id) => {
     try {
-      const response = await fetch(`http://localhost:8002/knowledge-base/${id}`);
+      const response = await fetch(`${API_URL}/knowledge-base/${id}`);
       const data = await response.json();
       setSelectedArticle(data);
       setShowArticleDialog(true);
@@ -97,7 +99,7 @@ const KnowledgeBase = () => {
 
   const markAsHelpful = async (articleId) => {
     try {
-      await fetch(`http://localhost:8002/knowledge-base/${articleId}/helpful`, {
+      await fetch(`${API_URL}/knowledge-base/${articleId}/helpful`, {
         method: 'POST'
       });
       // Refresh the article to show updated vote count
