@@ -104,6 +104,9 @@ class TicketResponse(TicketBase):
     resolution_notes: Optional[str] = None
     requester_name: Optional[str] = None
     assigned_to_name: Optional[str] = None
+    # ServiceNow integration fields
+    servicenow_sys_id: Optional[str] = None
+    servicenow_number: Optional[str] = None
 
     class Config:
         from_attributes = True

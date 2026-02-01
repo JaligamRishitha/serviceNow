@@ -37,7 +37,7 @@ import {
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 
-const MULESOFT_URL = "http://149.102.158.71:4797";
+const MULESOFT_URL = process.env.REACT_APP_MULESOFT_URL || "http://localhost:4797";
 
 const MyTickets = () => {
   const navigate = useNavigate();

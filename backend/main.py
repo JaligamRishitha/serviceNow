@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -6,6 +6,7 @@ from sqlalchemy import func
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from typing import Optional
 import os
 import hashlib
 import httpx
@@ -13,11 +14,12 @@ import httpx
 from database import SessionLocal, engine, Base
 from models import User, Incident, ServiceCatalogItem, KnowledgeArticle, Ticket, Approval, IncidentStatus, IncidentPriority, TicketStatus, ApprovalStatus
 from schemas import (
-    UserCreate, UserResponse, IncidentCreate, IncidentResponse, 
-    ServiceCatalogItemResponse, KnowledgeArticleCreate, KnowledgeArticleResponse, 
+    UserCreate, UserResponse, IncidentCreate, IncidentResponse,
+    ServiceCatalogItemResponse, KnowledgeArticleCreate, KnowledgeArticleResponse,
     TicketCreate, TicketUpdate, TicketResponse, ApprovalCreate, ApprovalUpdate, ApprovalResponse,
     Token
 )
+from servicenow_client import servicenow_client, ServiceNowClient
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -411,7 +413,7 @@ def read_approvals(
 
 async def notify_mulesoft_approval_status(ticket_number: str, status: str, approval_id: int, comments: str = None):
     """Notify MuleSoft about approval status change"""
-    mulesoft_url = os.getenv("MULESOFT_BASE_URL", "http://mulesoft-backend:4797")
+    mulesoft_url = os.getenv("MULESOFT_BASE_URL", "http://localhost:4797")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             payload = {
@@ -424,7 +426,7 @@ async def notify_mulesoft_approval_status(ticket_number: str, status: str, appro
             }
             # Try to notify MuleSoft about the approval status change
             response = await client.post(
-                f"{mulesoft_url}/api/webhooks/servicenow/approval-update",
+                f"{mulesoft_url}/api/ticket-approval",
                 json=payload,
                 headers={"Content-Type": "application/json"}
             )
@@ -1285,6 +1287,893 @@ Solutions for common Microsoft Teams problems during meetings and calls.
         print(f"Startup error: {e}")
     finally:
         db.close()
+
+# ============================================================================
+# MULESOFT INTEGRATION
+# ============================================================================
+
+MULESOFT_URL = os.getenv("MULESOFT_BASE_URL", "http://host.docker.internal:8090")
+
+
+@app.get("/api/mulesoft/health")
+async def mulesoft_health_check():
+    """Check MuleSoft connectivity"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{MULESOFT_URL}/api/health")
+            if response.status_code == 200:
+                return {"status": "healthy", "message": "Connected to MuleSoft", "url": MULESOFT_URL, "data": response.json()}
+            return {"status": "unhealthy", "message": f"MuleSoft returned {response.status_code}"}
+    except Exception as e:
+        return {"status": "unhealthy", "message": str(e), "url": MULESOFT_URL}
+
+
+@app.get("/api/mulesoft/tickets")
+async def get_mulesoft_tickets(current_user: User = Depends(get_current_user)):
+    """Fetch cases/tickets from MuleSoft (via Salesforce connector)"""
+    all_tickets = []
+
+    try:
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+            # First, authenticate with MuleSoft
+            auth_response = await client.post(
+                f"{MULESOFT_URL}/api/auth/login",
+                json={"email": "admin@example.com", "password": "admin123"}
+            )
+            if auth_response.status_code != 200:
+                return {"error": "MuleSoft authentication failed", "tickets": []}
+
+            token = auth_response.json().get("access_token", "")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Get list of connectors
+            connectors_response = await client.get(f"{MULESOFT_URL}/api/connectors", headers=headers)
+            if connectors_response.status_code == 200:
+                connectors = connectors_response.json()
+
+                # For each Salesforce connector, fetch cases
+                for connector in connectors:
+                    if connector.get("connector_type") == "salesforce":
+                        connector_id = connector.get("id")
+                        cases_response = await client.get(
+                            f"{MULESOFT_URL}/api/cases/external/cases",
+                            params={"connector_id": connector_id},
+                            headers=headers
+                        )
+                        if cases_response.status_code == 200:
+                            data = cases_response.json()
+                            # Handle both list and dict responses
+                            if isinstance(data, list):
+                                cases = data
+                            else:
+                                cases = data.get("cases", [])
+                            for case in cases:
+                                if not isinstance(case, dict):
+                                    continue
+                                all_tickets.append({
+                                    "source": "mulesoft_salesforce",
+                                    "connector_id": connector_id,
+                                    "id": case.get("id") or case.get("caseId"),
+                                    "ticket_number": case.get("caseNumber") or case.get("number"),
+                                    "title": case.get("subject") or case.get("title"),
+                                    "description": case.get("description"),
+                                    "status": case.get("status"),
+                                    "priority": case.get("priority"),
+                                })
+
+            return {"tickets": all_tickets, "count": len(all_tickets)}
+    except Exception as e:
+        return {"error": str(e), "tickets": []}
+
+
+@app.get("/api/mulesoft/tickets/{ticket_number}")
+async def get_mulesoft_ticket(ticket_number: str, current_user: User = Depends(get_current_user)):
+    """Fetch a specific ticket status from MuleSoft/ServiceNow"""
+    try:
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+            # Authenticate with MuleSoft
+            auth_response = await client.post(
+                f"{MULESOFT_URL}/api/auth/login",
+                json={"email": "admin@example.com", "password": "admin123"}
+            )
+            if auth_response.status_code != 200:
+                return {"error": "MuleSoft authentication failed"}
+
+            token = auth_response.json().get("access_token", "")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Get ticket status via MuleSoft
+            response = await client.get(
+                f"{MULESOFT_URL}/api/servicenow/ticket-status/{ticket_number}",
+                headers=headers
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {"error": f"Ticket not found or MuleSoft returned {response.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/mulesoft/connectors")
+async def get_mulesoft_connectors(current_user: User = Depends(get_current_user)):
+    """Get list of MuleSoft connectors"""
+    try:
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+            # Authenticate with MuleSoft
+            auth_response = await client.post(
+                f"{MULESOFT_URL}/api/auth/login",
+                json={"email": "admin@example.com", "password": "admin123"}
+            )
+            if auth_response.status_code != 200:
+                return {"error": "MuleSoft authentication failed", "connectors": []}
+
+            token = auth_response.json().get("access_token", "")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            response = await client.get(f"{MULESOFT_URL}/api/connectors", headers=headers)
+            if response.status_code == 200:
+                return {"connectors": response.json()}
+            return {"error": f"Failed to get connectors: {response.status_code}", "connectors": []}
+    except Exception as e:
+        return {"error": str(e), "connectors": []}
+
+
+@app.post("/api/mulesoft/send-to-servicenow")
+async def send_ticket_via_mulesoft(
+    ticket_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Send a ticket to ServiceNow via MuleSoft"""
+    try:
+        async with httpx.AsyncClient(timeout=30, verify=False) as client:
+            # Authenticate with MuleSoft
+            auth_response = await client.post(
+                f"{MULESOFT_URL}/api/auth/login",
+                json={"email": "admin@example.com", "password": "admin123"}
+            )
+            if auth_response.status_code != 200:
+                return {"error": "MuleSoft authentication failed"}
+
+            token = auth_response.json().get("access_token", "")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Send ticket via MuleSoft to ServiceNow
+            response = await client.post(
+                f"{MULESOFT_URL}/api/servicenow/send-ticket-and-approval",
+                headers=headers,
+                json=ticket_data,
+                params={"ticket_type": "incident", "approval_type": "service_request"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {"error": f"MuleSoft returned {response.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/mulesoft/sync")
+async def sync_from_mulesoft(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Sync tickets from MuleSoft to local database"""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{MULESOFT_URL}/api/tickets")
+            if response.status_code != 200:
+                return {"error": f"Failed to fetch from MuleSoft: {response.status_code}", "synced": 0}
+
+            mulesoft_tickets = response.json()
+            if isinstance(mulesoft_tickets, dict):
+                mulesoft_tickets = mulesoft_tickets.get("tickets", [])
+
+            synced_count = 0
+            for ms_ticket in mulesoft_tickets:
+                ticket_number = ms_ticket.get("ticket_number") or ms_ticket.get("number")
+                if not ticket_number:
+                    continue
+
+                # Check if ticket already exists
+                existing = db.query(Ticket).filter(Ticket.ticket_number == ticket_number).first()
+                if existing:
+                    # Update existing ticket
+                    if ms_ticket.get("status"):
+                        existing.status = ms_ticket["status"]
+                    if ms_ticket.get("title"):
+                        existing.title = ms_ticket["title"]
+                    synced_count += 1
+                else:
+                    # Create new ticket from MuleSoft
+                    new_ticket = Ticket(
+                        ticket_number=ticket_number,
+                        title=ms_ticket.get("title", "MuleSoft Ticket"),
+                        description=ms_ticket.get("description", ""),
+                        ticket_type=ms_ticket.get("ticket_type", "service_request"),
+                        status=ms_ticket.get("status", "submitted"),
+                        priority=ms_ticket.get("priority", "medium"),
+                        category=ms_ticket.get("category"),
+                        requester_id=current_user.id,
+                        servicenow_number=ms_ticket.get("servicenow_number"),
+                        servicenow_sys_id=ms_ticket.get("servicenow_sys_id")
+                    )
+                    db.add(new_ticket)
+                    synced_count += 1
+
+            db.commit()
+            return {"message": "Sync completed", "synced": synced_count}
+    except Exception as e:
+        return {"error": str(e), "synced": 0}
+
+
+# API endpoint for MuleSoft to create approvals
+@app.post("/api/approvals")
+async def create_approval_from_mulesoft(
+    approval_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Create approval from MuleSoft integration"""
+    try:
+        import random
+
+        # Find admin user for approval
+        admin_user = db.query(User).filter(User.role == "admin").first()
+        if not admin_user:
+            admin_user = db.query(User).first()
+        if not admin_user:
+            raise HTTPException(status_code=500, detail="No users in system")
+
+        approval_id = f"APR-{random.randint(100000, 999999)}"
+
+        return {
+            "approval_id": approval_id,
+            "status": "pending",
+            "message": "Approval request created successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# API endpoint for MuleSoft to create tickets (matches MuleSoft's expected endpoint)
+@app.post("/api/tickets")
+async def create_ticket_from_mulesoft(
+    ticket_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Create ticket from MuleSoft integration"""
+    try:
+        import random
+
+        # Find default user
+        default_user = db.query(User).first()
+        if not default_user:
+            raise HTTPException(status_code=500, detail="No users in system")
+
+        # Generate ticket number
+        ticket_number = f"TKT{random.randint(100000, 999999)}"
+
+        # Map priority from MuleSoft format (1-5) to our format
+        raw_priority = ticket_data.get("priority", "3")
+        priority_map = {"1": "critical", "2": "high", "3": "medium", "4": "low", "5": "low",
+                        "Critical": "critical", "High": "high", "Medium": "medium", "Low": "low"}
+        priority = priority_map.get(str(raw_priority), "medium")
+
+        # Map MuleSoft fields to our schema
+        # Set status to pending_approval so tickets require manual approval
+        new_ticket = Ticket(
+            ticket_number=ticket_number,
+            title=ticket_data.get("short_description") or ticket_data.get("subject", "MuleSoft Ticket"),
+            description=ticket_data.get("description", ""),
+            ticket_type=ticket_data.get("ticket_type", "incident"),
+            status="pending_approval",  # Requires manual approval
+            priority=priority,
+            category=ticket_data.get("category"),
+            requester_id=default_user.id,
+        )
+        db.add(new_ticket)
+        db.commit()
+        db.refresh(new_ticket)
+
+        return {
+            "id": new_ticket.id,
+            "ticket_number": new_ticket.ticket_number,
+            "title": new_ticket.title,
+            "status": new_ticket.status.value if hasattr(new_ticket.status, 'value') else new_ticket.status,
+            "message": "Ticket created successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Webhook endpoint for MuleSoft to push tickets
+@app.post("/api/webhooks/mulesoft/ticket")
+async def mulesoft_ticket_webhook(
+    ticket_data: dict,
+    db: Session = Depends(get_db)
+):
+    """Receive ticket updates from MuleSoft"""
+    try:
+        ticket_number = ticket_data.get("ticket_number") or ticket_data.get("number")
+        if not ticket_number:
+            raise HTTPException(status_code=400, detail="ticket_number is required")
+
+        # Find or create ticket
+        existing = db.query(Ticket).filter(Ticket.ticket_number == ticket_number).first()
+
+        if existing:
+            # Update existing ticket
+            if ticket_data.get("status"):
+                existing.status = ticket_data["status"]
+            if ticket_data.get("title"):
+                existing.title = ticket_data["title"]
+            if ticket_data.get("description"):
+                existing.description = ticket_data["description"]
+            if ticket_data.get("priority"):
+                existing.priority = ticket_data["priority"]
+            db.commit()
+            return {"message": "Ticket updated", "ticket_number": ticket_number}
+        else:
+            # Find a default user for the ticket
+            default_user = db.query(User).first()
+            if not default_user:
+                raise HTTPException(status_code=500, detail="No users in system")
+
+            # Create new ticket
+            import random
+            new_ticket = Ticket(
+                ticket_number=ticket_number,
+                title=ticket_data.get("title", "MuleSoft Ticket"),
+                description=ticket_data.get("description", ""),
+                ticket_type=ticket_data.get("ticket_type", "service_request"),
+                status=ticket_data.get("status", "submitted"),
+                priority=ticket_data.get("priority", "medium"),
+                category=ticket_data.get("category"),
+                requester_id=default_user.id,
+                servicenow_number=ticket_data.get("servicenow_number"),
+                servicenow_sys_id=ticket_data.get("servicenow_sys_id")
+            )
+            db.add(new_ticket)
+            db.commit()
+            return {"message": "Ticket created", "ticket_number": ticket_number}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# SERVICENOW MCP INTEGRATION ENDPOINTS
+# ============================================================================
+
+@app.get("/api/servicenow/health")
+async def servicenow_health_check():
+    """Check ServiceNow connectivity status"""
+    return await servicenow_client.health_check()
+
+
+@app.get("/api/all-tickets")
+async def get_all_tickets(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get tickets from all sources: Local DB, MuleSoft, and ServiceNow MCP"""
+    all_tickets = []
+
+    # 1. Get local database tickets
+    local_tickets = db.query(Ticket).all()
+    for ticket in local_tickets:
+        all_tickets.append({
+            "source": "local",
+            "id": ticket.id,
+            "ticket_number": ticket.ticket_number,
+            "title": ticket.title,
+            "description": ticket.description,
+            "status": ticket.status.value if hasattr(ticket.status, 'value') else ticket.status,
+            "priority": ticket.priority.value if hasattr(ticket.priority, 'value') else ticket.priority,
+            "ticket_type": ticket.ticket_type.value if hasattr(ticket.ticket_type, 'value') else ticket.ticket_type,
+            "category": ticket.category,
+            "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+            "servicenow_number": ticket.servicenow_number,
+            "servicenow_sys_id": ticket.servicenow_sys_id,
+        })
+
+    # 2. Get ServiceNow MCP incidents (mock data)
+    snow_incidents = await servicenow_client.list_incidents()
+    if "result" in snow_incidents:
+        for inc in snow_incidents["result"]:
+            # Check if not already in local tickets by servicenow_number
+            if not any(t.get("servicenow_number") == inc.get("number") for t in all_tickets):
+                all_tickets.append({
+                    "source": "servicenow",
+                    "id": inc.get("sys_id"),
+                    "ticket_number": inc.get("number"),
+                    "title": inc.get("short_description"),
+                    "description": inc.get("description"),
+                    "status": _map_snow_state(inc.get("state")),
+                    "priority": _map_snow_priority(inc.get("priority")),
+                    "ticket_type": "incident",
+                    "category": inc.get("category"),
+                    "created_at": inc.get("sys_created_on"),
+                    "servicenow_number": inc.get("number"),
+                    "servicenow_sys_id": inc.get("sys_id"),
+                })
+
+    # 3. Try to get MuleSoft tickets
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{MULESOFT_URL}/api/tickets")
+            if response.status_code == 200:
+                ms_data = response.json()
+                ms_tickets = ms_data if isinstance(ms_data, list) else ms_data.get("tickets", [])
+                for ms_ticket in ms_tickets:
+                    ticket_num = ms_ticket.get("ticket_number") or ms_ticket.get("number")
+                    # Check if not already in all_tickets
+                    if ticket_num and not any(t.get("ticket_number") == ticket_num for t in all_tickets):
+                        all_tickets.append({
+                            "source": "mulesoft",
+                            "id": ms_ticket.get("id"),
+                            "ticket_number": ticket_num,
+                            "title": ms_ticket.get("title") or ms_ticket.get("short_description"),
+                            "description": ms_ticket.get("description"),
+                            "status": ms_ticket.get("status", "submitted"),
+                            "priority": ms_ticket.get("priority", "medium"),
+                            "ticket_type": ms_ticket.get("ticket_type", "service_request"),
+                            "category": ms_ticket.get("category"),
+                            "created_at": ms_ticket.get("created_at"),
+                            "servicenow_number": ms_ticket.get("servicenow_number"),
+                            "servicenow_sys_id": ms_ticket.get("servicenow_sys_id"),
+                        })
+    except Exception as e:
+        # MuleSoft not available, continue without it
+        pass
+
+    return {
+        "tickets": all_tickets,
+        "sources": {
+            "local": len([t for t in all_tickets if t["source"] == "local"]),
+            "servicenow": len([t for t in all_tickets if t["source"] == "servicenow"]),
+            "mulesoft": len([t for t in all_tickets if t["source"] == "mulesoft"]),
+        }
+    }
+
+
+def _map_snow_state(state: str) -> str:
+    """Map ServiceNow state to local status"""
+    state_map = {
+        "1": "submitted",      # New
+        "2": "in_progress",    # In Progress
+        "3": "in_progress",    # On Hold
+        "4": "pending_approval",
+        "5": "pending_approval",
+        "6": "resolved",       # Resolved
+        "7": "closed",         # Closed
+        "8": "cancelled",      # Cancelled
+    }
+    return state_map.get(str(state), "submitted")
+
+
+def _map_snow_priority(priority: str) -> str:
+    """Map ServiceNow priority to local priority"""
+    priority_map = {
+        "1": "critical",
+        "2": "high",
+        "3": "medium",
+        "4": "low",
+        "5": "low",
+    }
+    return priority_map.get(str(priority), "medium")
+
+
+# ServiceNow Incident endpoints
+@app.get("/api/servicenow/incidents")
+async def list_servicenow_incidents(
+    skip: int = 0,
+    limit: int = 50,
+    query: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List incidents from ServiceNow"""
+    result = await servicenow_client.list_incidents(skip=skip, limit=limit, query=query)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/incidents/{incident_id}")
+async def get_servicenow_incident(
+    incident_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific incident from ServiceNow"""
+    result = await servicenow_client.get_incident(incident_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.post("/api/servicenow/incidents")
+async def create_servicenow_incident(
+    short_description: str,
+    description: str = "",
+    priority: str = "3",
+    urgency: str = "3",
+    impact: str = "3",
+    category: str = "",
+    assignment_group: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new incident in ServiceNow"""
+    result = await servicenow_client.create_incident(
+        short_description=short_description,
+        description=description,
+        priority=priority,
+        urgency=urgency,
+        impact=impact,
+        category=category,
+        assignment_group=assignment_group
+    )
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.put("/api/servicenow/incidents/{incident_id}")
+async def update_servicenow_incident(
+    incident_id: str,
+    updates: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Update an incident in ServiceNow"""
+    result = await servicenow_client.update_incident(incident_id, updates)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.post("/api/servicenow/incidents/{incident_id}/close")
+async def close_servicenow_incident(
+    incident_id: str,
+    close_notes: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """Close an incident in ServiceNow"""
+    result = await servicenow_client.close_incident(incident_id, close_notes=close_notes)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Change Request endpoints
+@app.get("/api/servicenow/changes")
+async def list_servicenow_changes(
+    skip: int = 0,
+    limit: int = 50,
+    query: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List change requests from ServiceNow"""
+    result = await servicenow_client.list_change_requests(skip=skip, limit=limit, query=query)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/changes/{change_id}")
+async def get_servicenow_change(
+    change_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific change request from ServiceNow"""
+    result = await servicenow_client.get_change_request(change_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.post("/api/servicenow/changes")
+async def create_servicenow_change(
+    short_description: str,
+    description: str = "",
+    change_type: str = "normal",
+    priority: str = "3",
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new change request in ServiceNow"""
+    result = await servicenow_client.create_change_request(
+        short_description=short_description,
+        description=description,
+        change_type=change_type,
+        priority=priority
+    )
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Problem endpoints
+@app.get("/api/servicenow/problems")
+async def list_servicenow_problems(
+    skip: int = 0,
+    limit: int = 50,
+    query: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List problems from ServiceNow"""
+    result = await servicenow_client.list_problems(skip=skip, limit=limit, query=query)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/problems/{problem_id}")
+async def get_servicenow_problem(
+    problem_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific problem from ServiceNow"""
+    result = await servicenow_client.get_problem(problem_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.post("/api/servicenow/problems")
+async def create_servicenow_problem(
+    short_description: str,
+    description: str = "",
+    priority: str = "3",
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new problem in ServiceNow"""
+    result = await servicenow_client.create_problem(
+        short_description=short_description,
+        description=description,
+        priority=priority
+    )
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Service Request endpoints
+@app.get("/api/servicenow/requests")
+async def list_servicenow_requests(
+    skip: int = 0,
+    limit: int = 50,
+    query: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List service requests from ServiceNow"""
+    result = await servicenow_client.list_service_requests(skip=skip, limit=limit, query=query)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/requests/{request_id}")
+async def get_servicenow_request(
+    request_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific service request from ServiceNow"""
+    result = await servicenow_client.get_service_request(request_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Config Items (CMDB) endpoints
+@app.get("/api/servicenow/cmdb")
+async def list_servicenow_config_items(
+    skip: int = 0,
+    limit: int = 50,
+    query: str = "",
+    ci_class: str = "cmdb_ci",
+    current_user: User = Depends(get_current_user)
+):
+    """List configuration items from ServiceNow CMDB"""
+    result = await servicenow_client.list_config_items(
+        skip=skip, limit=limit, query=query, ci_class=ci_class
+    )
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/cmdb/{ci_id}")
+async def get_servicenow_config_item(
+    ci_id: str,
+    ci_class: str = "cmdb_ci",
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific configuration item from ServiceNow CMDB"""
+    result = await servicenow_client.get_config_item(ci_id, ci_class=ci_class)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow User endpoints
+@app.get("/api/servicenow/users")
+async def list_servicenow_users(
+    skip: int = 0,
+    limit: int = 50,
+    query: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List users from ServiceNow"""
+    result = await servicenow_client.list_users(skip=skip, limit=limit, query=query)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/users/{user_id}")
+async def get_servicenow_user(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific user from ServiceNow"""
+    result = await servicenow_client.get_user(user_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Knowledge Base endpoints
+@app.get("/api/servicenow/knowledge")
+async def search_servicenow_knowledge(
+    query: str,
+    limit: int = 10,
+    current_user: User = Depends(get_current_user)
+):
+    """Search ServiceNow knowledge base"""
+    result = await servicenow_client.search_knowledge_base(query=query, limit=limit)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/knowledge/{article_id}")
+async def get_servicenow_knowledge_article(
+    article_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific knowledge article from ServiceNow"""
+    result = await servicenow_client.get_knowledge_article(article_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Catalog endpoints
+@app.get("/api/servicenow/catalog")
+async def list_servicenow_catalog(
+    skip: int = 0,
+    limit: int = 50,
+    category: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List service catalog items from ServiceNow"""
+    result = await servicenow_client.list_catalog_items(
+        skip=skip, limit=limit, category=category
+    )
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.get("/api/servicenow/catalog/{item_id}")
+async def get_servicenow_catalog_item(
+    item_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific catalog item from ServiceNow"""
+    result = await servicenow_client.get_catalog_item(item_id)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# ServiceNow Approval endpoints
+@app.get("/api/servicenow/approvals")
+async def list_servicenow_approvals(
+    skip: int = 0,
+    limit: int = 50,
+    state: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """List approvals from ServiceNow"""
+    result = await servicenow_client.list_approvals(skip=skip, limit=limit, state=state)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.post("/api/servicenow/approvals/{approval_id}/approve")
+async def approve_servicenow_request(
+    approval_id: str,
+    comments: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """Approve a request in ServiceNow"""
+    result = await servicenow_client.approve_request(approval_id, comments=comments)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+@app.post("/api/servicenow/approvals/{approval_id}/reject")
+async def reject_servicenow_request(
+    approval_id: str,
+    comments: str = "",
+    current_user: User = Depends(get_current_user)
+):
+    """Reject a request in ServiceNow"""
+    result = await servicenow_client.reject_request(approval_id, comments=comments)
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+    return result
+
+
+# Sync endpoint to create ticket in both local DB and ServiceNow
+@app.post("/api/tickets/sync-to-servicenow/{ticket_id}")
+async def sync_ticket_to_servicenow(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Sync a local ticket to ServiceNow as an incident or service request"""
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    # Check if user can sync this ticket
+    if current_user.role == "user" and ticket.requester_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Map ticket type to ServiceNow record type
+    if ticket.ticket_type == "incident":
+        result = await servicenow_client.create_incident(
+            short_description=ticket.title,
+            description=ticket.description or "",
+            priority=_map_priority(ticket.priority),
+            category=ticket.category or "",
+        )
+    else:
+        result = await servicenow_client.create_service_request(
+            short_description=ticket.title,
+            description=ticket.description or "",
+            priority=_map_priority(ticket.priority),
+        )
+
+    if "error" in result:
+        raise HTTPException(status_code=502, detail=result)
+
+    # Store ServiceNow sys_id reference in ticket
+    if "result" in result and result["result"]:
+        snow_record = result["result"]
+        ticket.servicenow_sys_id = snow_record.get("sys_id")
+        ticket.servicenow_number = snow_record.get("number")
+        db.commit()
+
+    return {
+        "message": "Ticket synced to ServiceNow",
+        "servicenow_record": result.get("result", result)
+    }
+
+
+def _map_priority(priority) -> str:
+    """Map local priority to ServiceNow priority"""
+    priority_map = {
+        "critical": "1",
+        "high": "2",
+        "medium": "3",
+        "low": "4",
+    }
+    if hasattr(priority, 'value'):
+        return priority_map.get(priority.value, "3")
+    return priority_map.get(str(priority).lower(), "3")
+
 
 if __name__ == "__main__":
     import uvicorn

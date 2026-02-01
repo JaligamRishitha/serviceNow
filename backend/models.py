@@ -125,6 +125,9 @@ class Ticket(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     due_date = Column(DateTime, nullable=True)
     resolution_notes = Column(Text, nullable=True)
+    # ServiceNow integration fields
+    servicenow_sys_id = Column(String, nullable=True, index=True)
+    servicenow_number = Column(String, nullable=True, index=True)
 
     requester = relationship("User", back_populates="submitted_tickets", foreign_keys=[requester_id])
     assigned_to = relationship("User", back_populates="assigned_tickets", foreign_keys=[assigned_to_id])
