@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from typing import Optional
+from pydantic import BaseModel
 import os
 import hashlib
 import httpx
@@ -413,7 +414,7 @@ def read_approvals(
 
 async def notify_mulesoft_approval_status(ticket_number: str, status: str, approval_id: int, comments: str = None):
     """Notify MuleSoft about approval status change"""
-    mulesoft_url = os.getenv("MULESOFT_BASE_URL", "http://localhost:4797")
+    mulesoft_url = os.getenv("MULESOFT_BASE_URL", "http://149.102.158.71:8091")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             payload = {
@@ -1292,7 +1293,7 @@ Solutions for common Microsoft Teams problems during meetings and calls.
 # MULESOFT INTEGRATION
 # ============================================================================
 
-MULESOFT_URL = os.getenv("MULESOFT_BASE_URL", "http://host.docker.internal:8090")
+MULESOFT_URL = os.getenv("MULESOFT_BASE_URL", "http://149.102.158.71:8091")
 
 
 @app.get("/api/mulesoft/health")
@@ -1532,6 +1533,38 @@ async def create_approval_from_mulesoft(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# API endpoint for MuleSoft to get tickets (matches MuleSoft's expected endpoint)
+@app.get("/api/tickets")
+async def get_tickets_for_mulesoft(
+    skip: int = 0,
+    limit: int = 100,
+    category: str = None,
+    db: Session = Depends(get_db)
+):
+    """Get tickets for MuleSoft integration - no auth required for integration"""
+    query = db.query(Ticket)
+    
+    if category:
+        query = query.filter(Ticket.category == category)
+    
+    tickets = query.offset(skip).limit(limit).all()
+    
+    return [
+        {
+            "id": ticket.id,
+            "ticket_number": ticket.ticket_number,
+            "title": ticket.title,
+            "description": ticket.description,
+            "category": ticket.category,
+            "subcategory": ticket.subcategory,
+            "status": ticket.status,
+            "priority": ticket.priority,
+            "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+            "updated_at": ticket.updated_at.isoformat() if ticket.updated_at else None
+        }
+        for ticket in tickets
+    ]
 
 # API endpoint for MuleSoft to create tickets (matches MuleSoft's expected endpoint)
 @app.post("/api/tickets")
@@ -2173,6 +2206,625 @@ def _map_priority(priority) -> str:
     if hasattr(priority, 'value'):
         return priority_map.get(priority.value, "3")
     return priority_map.get(str(priority).lower(), "3")
+
+
+# ============================================================================
+# AUTOMATED TICKET CREATION & WORKFLOW ENDPOINTS
+# ============================================================================
+
+from schemas import (
+    AutoCreateTicketRequest,
+    AutoCreateTicketResponse,
+    SLABreachResponse,
+    NotificationResponse,
+    AssignmentGroupResponse,
+)
+from categorization import categorize_event, detect_priority
+from assignment_rules import (
+    assign_by_category,
+    create_default_groups,
+    create_default_category_mappings,
+    list_available_groups,
+    get_group_workload,
+)
+from sla import (
+    create_ticket_sla,
+    check_sla_breaches,
+    get_slas_approaching_breach,
+    get_ticket_sla_status,
+    mark_response_met,
+    mark_resolution_met,
+    create_all_default_sla_definitions,
+)
+from notifications import (
+    notify_ticket_created,
+    notify_ticket_assigned,
+    notify_sla_warning,
+    notify_sla_breach,
+    get_pending_notifications,
+    process_pending_notifications,
+)
+from models import (
+    AssignmentGroup,
+    AssignmentGroupMember,
+    CategoryAssignmentMapping,
+    SLADefinition,
+    TicketSLA,
+    Notification as NotificationModel,
+)
+
+
+@app.post("/api/tickets/auto-create", response_model=AutoCreateTicketResponse)
+async def auto_create_ticket(
+    request: AutoCreateTicketRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Auto-create a ticket from a system event with categorization, assignment, and SLA.
+
+    This endpoint:
+    1. Creates a ticket with proper categorization
+    2. Assigns to appropriate group/agent based on category
+    3. Sets up SLA timers based on priority
+    4. Sends notifications
+
+    Called by MuleSoft when capturing system events.
+    """
+    import random
+
+    try:
+        # Find or create default user for system-created tickets
+        default_user = db.query(User).filter(User.email == "admin@company.com").first()
+        if not default_user:
+            default_user = db.query(User).first()
+        if not default_user:
+            raise HTTPException(status_code=500, detail="No users in system")
+
+        # Auto-categorize if needed
+        category, subcategory = categorize_event(
+            event_type=request.event_type,
+            title=request.title,
+            description=request.description or "",
+            category=request.category,
+            subcategory=request.subcategory
+        )
+
+        # Detect priority if not explicitly set
+        priority = request.priority
+        if not priority or priority == "medium":
+            detected_priority = detect_priority(
+                f"{request.title} {request.description or ''}",
+                default_priority=request.priority or "medium"
+            )
+            priority = detected_priority
+
+        # Generate ticket number
+        ticket_number = f"TKT{random.randint(100000, 999999)}"
+
+        # Create the ticket
+        new_ticket = Ticket(
+            ticket_number=ticket_number,
+            title=request.title,
+            description=request.description or "",
+            ticket_type=request.ticket_type,
+            status="submitted" if not request.requires_approval else "pending_approval",
+            priority=priority,
+            category=category,
+            subcategory=subcategory,
+            requester_id=default_user.id,
+        )
+        db.add(new_ticket)
+        db.commit()
+        db.refresh(new_ticket)
+
+        # Assign to group and agent
+        assignment_result = assign_by_category(
+            db=db,
+            ticket_id=new_ticket.id,
+            category=category,
+            subcategory=subcategory,
+            fallback_group=request.assignment_group,
+            auto_assign_agent=request.auto_assign
+        )
+
+        # Refresh ticket to get assignment
+        db.refresh(new_ticket)
+
+        # Create SLA timer
+        ticket_sla = create_ticket_sla(
+            db=db,
+            ticket_id=new_ticket.id,
+            priority=priority,
+            category=category,
+            created_at=new_ticket.created_at
+        )
+
+        # Send notifications
+        await notify_ticket_created(
+            db=db,
+            ticket_id=new_ticket.id,
+            event_id=request.event_id,
+            callback_url=request.callback_url
+        )
+
+        if new_ticket.assigned_to_id:
+            await notify_ticket_assigned(
+                db=db,
+                ticket_id=new_ticket.id,
+                assigned_to_id=new_ticket.assigned_to_id,
+                assignment_group=assignment_result.get("group_name")
+            )
+
+        return AutoCreateTicketResponse(
+            ticket_id=new_ticket.id,
+            ticket_number=new_ticket.ticket_number,
+            title=new_ticket.title,
+            category=category,
+            subcategory=subcategory,
+            priority=priority,
+            status=new_ticket.status.value if hasattr(new_ticket.status, 'value') else str(new_ticket.status),
+            assignment_group=assignment_result.get("group_name", request.assignment_group),
+            assigned_to_id=assignment_result.get("assigned_to_id"),
+            assigned_to_name=assignment_result.get("assigned_to_name"),
+            sla_response_due=ticket_sla.response_due_at if ticket_sla else None,
+            sla_resolution_due=ticket_sla.resolution_due_at if ticket_sla else None,
+            created_at=new_ticket.created_at,
+            event_id=request.event_id,
+            message=f"Ticket created and assigned to {assignment_result.get('group_name', 'IT Service Desk')}"
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sla/check-breaches")
+async def check_sla_breaches_endpoint(db: Session = Depends(get_db)):
+    """
+    Check all active SLAs for breaches and send notifications.
+
+    Returns list of breached SLAs.
+    """
+    breaches = check_sla_breaches(db)
+
+    # Send breach notifications
+    for breach in breaches:
+        if not breach.get("notified"):
+            await notify_sla_breach(
+                db=db,
+                ticket_id=breach["ticket_id"],
+                sla_type=breach["sla_type"],
+                minutes_overdue=breach["minutes_overdue"]
+            )
+
+    return {
+        "breaches": breaches,
+        "count": len(breaches),
+        "checked_at": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+@app.get("/api/sla/warnings")
+async def get_sla_warnings(
+    threshold: int = 80,
+    db: Session = Depends(get_db)
+):
+    """
+    Get SLAs approaching breach threshold.
+
+    Args:
+        threshold: Percentage threshold for warnings (default 80%)
+    """
+    warnings = get_slas_approaching_breach(db, threshold_percent=threshold)
+
+    # Send warning notifications
+    for warning in warnings:
+        await notify_sla_warning(
+            db=db,
+            ticket_id=warning["ticket_id"],
+            sla_type=warning["sla_type"],
+            percent_elapsed=warning["percent_elapsed"],
+            minutes_remaining=warning["minutes_remaining"]
+        )
+
+    return {
+        "warnings": warnings,
+        "count": len(warnings),
+        "threshold_percent": threshold,
+        "checked_at": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+@app.get("/api/sla/ticket/{ticket_id}")
+async def get_ticket_sla(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get SLA status for a specific ticket."""
+    sla_status = get_ticket_sla_status(db, ticket_id)
+
+    if not sla_status:
+        raise HTTPException(status_code=404, detail="No SLA found for this ticket")
+
+    return sla_status
+
+
+@app.post("/api/sla/ticket/{ticket_id}/response-met")
+async def mark_ticket_response_met(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Mark the response SLA as met for a ticket."""
+    sla = mark_response_met(db, ticket_id)
+
+    if not sla:
+        raise HTTPException(status_code=404, detail="No active SLA found for this ticket")
+
+    return {
+        "message": "Response SLA marked as met",
+        "response_met_at": sla.response_met_at.isoformat() if sla.response_met_at else None,
+        "response_breached": sla.response_breached == "true"
+    }
+
+
+@app.get("/api/notifications/pending")
+async def get_pending_notifications_endpoint(
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """Get pending notifications that need to be sent."""
+    notifications = get_pending_notifications(db, limit=limit)
+
+    return {
+        "notifications": notifications,
+        "count": len(notifications)
+    }
+
+
+@app.post("/api/notifications/process")
+async def process_notifications(
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    """Process and send pending notifications."""
+    results = await process_pending_notifications(db, limit=limit)
+
+    return results
+
+
+@app.get("/api/assignment-groups")
+async def list_assignment_groups(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List all active assignment groups."""
+    groups = list_available_groups(db)
+    return {"groups": groups, "count": len(groups)}
+
+
+@app.get("/api/assignment-groups/{group_id}/workload")
+async def get_assignment_group_workload(
+    group_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get workload statistics for an assignment group."""
+    workload = get_group_workload(db, group_id)
+
+    if "error" in workload:
+        raise HTTPException(status_code=404, detail=workload["error"])
+
+    return workload
+
+
+@app.post("/api/setup/seed-assignment-data")
+async def seed_assignment_data(db: Session = Depends(get_db)):
+    """
+    Seed default assignment groups, category mappings, and SLA definitions.
+
+    Call this endpoint to initialize the system with default data.
+    """
+    try:
+        # Create default assignment groups
+        groups = create_default_groups(db)
+
+        # Create default category mappings
+        mappings = create_default_category_mappings(db)
+
+        # Create default SLA definitions
+        sla_defs = create_all_default_sla_definitions(db)
+
+        return {
+            "message": "Assignment data seeded successfully",
+            "groups_created": len(groups),
+            "mappings_created": len(mappings),
+            "sla_definitions_created": len(sla_defs)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sla/definitions")
+async def list_sla_definitions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List all SLA definitions."""
+    definitions = db.query(SLADefinition).filter(
+        SLADefinition.is_active == "true"
+    ).all()
+
+    return {
+        "definitions": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "description": d.description,
+                "priority": d.priority,
+                "category": d.category,
+                "response_time_minutes": d.response_time_minutes,
+                "resolution_time_hours": d.resolution_time_hours,
+                "business_hours_only": d.business_hours_only == "true",
+                "warning_threshold_percent": d.warning_threshold_percent,
+            }
+            for d in definitions
+        ],
+        "count": len(definitions)
+    }
+
+
+# Webhook endpoint for MuleSoft SLA notifications
+@app.post("/api/webhooks/sla-notification")
+async def receive_sla_notification(
+    payload: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Webhook endpoint to receive SLA notifications from MuleSoft.
+
+    This is mainly for testing/logging purposes.
+    """
+    print(f"Received SLA notification: {payload}")
+
+    return {
+        "received": True,
+        "event_type": payload.get("event_type"),
+        "ticket_number": payload.get("ticket_number"),
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+# Webhook endpoint for ticket notifications
+@app.post("/api/webhooks/ticket-notification")
+async def receive_ticket_notification(
+    payload: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Webhook endpoint to receive ticket notifications.
+
+    This is mainly for testing/logging purposes.
+    """
+    print(f"Received ticket notification: {payload}")
+
+    return {
+        "received": True,
+        "event_type": payload.get("event_type"),
+        "ticket_number": payload.get("ticket_number"),
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+# =============================================================================
+# PASSWORD RESET FLOW (ServiceNow → MuleSoft → SAP)
+# =============================================================================
+
+MULESOFT_PASSWORD_RESET_URL = os.getenv("MULESOFT_URL", "http://mulesoft-backend:4797")
+
+
+class PasswordResetTicketCreate(BaseModel):
+    """Schema for creating password reset ticket"""
+    username: str
+    user_email: Optional[str] = None
+    reason: Optional[str] = None
+    priority: str = "medium"
+
+
+class PasswordResetTicketResponse(BaseModel):
+    """Response for password reset ticket"""
+    ticket_number: str
+    correlation_id: str
+    sap_ticket_id: Optional[str] = None
+    username: str
+    status: str
+    message: str
+    created_at: str
+
+
+@app.post("/api/password-reset/submit", response_model=PasswordResetTicketResponse)
+async def submit_password_reset_ticket(
+    request: PasswordResetTicketCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Submit a password reset ticket.
+
+    Flow:
+    1. Creates a local ticket in ServiceNow
+    2. Sends ticket to MuleSoft
+    3. MuleSoft forwards to SAP
+    4. Returns tracking info
+    """
+    import random
+
+    # Create local ticket (audit only - auto-approved, no manual approval needed)
+    ticket_number = f"PWD{random.randint(100000, 999999)}"
+
+    db_ticket = Ticket(
+        ticket_number=ticket_number,
+        title=f"Password Reset: {request.username}",
+        description=f"Password reset requested for user: {request.username}\nReason: {request.reason or 'User requested password reset'}\n\n[AUTO-APPROVED] This ticket is for audit purposes only and does not require manual approval.",
+        ticket_type="service_request",
+        priority=request.priority,
+        category="User Account",
+        subcategory="Password Reset",
+        requester_id=current_user.id,
+        status="in_progress"  # Skip approval workflow - go directly to in_progress
+    )
+
+    db.add(db_ticket)
+    db.commit()
+    db.refresh(db_ticket)
+
+    # Send to MuleSoft
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{MULESOFT_PASSWORD_RESET_URL}/api/password-reset/from-servicenow",
+                json={
+                    "servicenow_ticket_id": ticket_number,
+                    "username": request.username,
+                    "user_email": request.user_email,
+                    "requester_name": current_user.full_name,
+                    "requester_email": current_user.email,
+                    "reason": request.reason,
+                    "priority": request.priority,
+                    "correlation_id": correlation_id
+                }
+            )
+
+            if response.status_code in [200, 201]:
+                result = response.json()
+
+                # Update ticket with SAP info (keep in_progress - auto-approved)
+                db_ticket.external_ticket_id = result.get("sap_ticket_id")
+                # Status remains "in_progress" - waiting for SAP admin
+                db.commit()
+
+                return PasswordResetTicketResponse(
+                    ticket_number=ticket_number,
+                    correlation_id=result.get("correlation_id", ""),
+                    sap_ticket_id=result.get("sap_ticket_id"),
+                    username=request.username,
+                    status="in_progress",
+                    message="Password reset ticket sent to SAP. Awaiting admin action.",
+                    created_at=datetime.utcnow().isoformat() + "Z"
+                )
+            else:
+                db_ticket.status = "cancelled"  # Failed to send
+                db_ticket.resolution_notes = f"Failed to send to MuleSoft: {response.text}"
+                db.commit()
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to send ticket to MuleSoft: {response.text}"
+                )
+
+    except httpx.RequestError as e:
+        db_ticket.status = "cancelled"  # Connection failed
+        db_ticket.resolution_notes = f"Could not connect to MuleSoft: {str(e)}"
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to MuleSoft: {str(e)}"
+        )
+
+
+@app.patch("/api/tickets/{ticket_number}/status")
+async def update_ticket_status_from_sap(
+    ticket_number: str,
+    payload: dict,
+    db: Session = Depends(get_db)
+):
+    """
+    Update ticket status (callback from MuleSoft/SAP).
+
+    This endpoint is called by MuleSoft when SAP updates the ticket status.
+    Creates a ticket record if it doesn't exist (for integration scenarios).
+    """
+    ticket = db.query(Ticket).filter(Ticket.ticket_number == ticket_number).first()
+
+    # Map status from SAP/MuleSoft format
+    status_mapping = {
+        "completed": "resolved",
+        "closed": "resolved",
+        "failed": "failed",
+        "in_progress": "in_progress",
+        "open": "open"
+    }
+
+    new_status = payload.get("status", "").lower()
+    mapped_status = status_mapping.get(new_status, new_status)
+
+    if not ticket:
+        # Create ticket for integration scenarios (ticket originated from external system)
+        # Get system user for integration-created tickets
+        system_user = db.query(User).filter(User.email == "admin@servicenow.com").first()
+        if not system_user:
+            system_user = db.query(User).first()
+
+        ticket = Ticket(
+            ticket_number=ticket_number,
+            title=f"Password Reset (External): {ticket_number}",
+            description=f"Password reset ticket created via integration.\nSource: {payload.get('source', 'sap_integration')}",
+            ticket_type="service_request",
+            priority="medium",
+            category="User Account",
+            subcategory="Password Reset",
+            requester_id=system_user.id if system_user else 1,
+            status=mapped_status
+        )
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+        old_status = "new"
+        print(f"Ticket {ticket_number} created via integration with status: {mapped_status}")
+    else:
+        old_status = ticket.status
+        ticket.status = mapped_status
+        ticket.updated_at = datetime.utcnow()
+
+        if payload.get("resolution_notes"):
+            ticket.resolution_notes = payload.get("resolution_notes")
+
+        db.commit()
+        print(f"Ticket {ticket_number} status updated: {old_status} → {ticket.status}")
+
+    return {
+        "ticket_number": ticket_number,
+        "old_status": old_status,
+        "new_status": ticket.status,
+        "message": "Status updated successfully",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+
+@app.get("/api/password-reset/tickets")
+async def list_password_reset_tickets(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List password reset tickets for current user."""
+    tickets = db.query(Ticket).filter(
+        Ticket.category == "User Account",
+        Ticket.subcategory == "Password Reset",
+        Ticket.requester_id == current_user.id
+    ).order_by(Ticket.created_at.desc()).limit(50).all()
+
+    return {
+        "tickets": [
+            {
+                "ticket_number": t.ticket_number,
+                "title": t.title,
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "updated_at": t.updated_at.isoformat() if t.updated_at else None
+            }
+            for t in tickets
+        ],
+        "total": len(tickets)
+    }
 
 
 if __name__ == "__main__":

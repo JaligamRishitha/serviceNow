@@ -139,3 +139,219 @@ class ApprovalResponse(ApprovalBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+
+# ============================================================================
+# ASSIGNMENT GROUP SCHEMAS
+# ============================================================================
+
+class AssignmentGroupBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    email: Optional[str] = None
+
+
+class AssignmentGroupCreate(AssignmentGroupBase):
+    manager_id: Optional[int] = None
+
+
+class AssignmentGroupResponse(AssignmentGroupBase):
+    id: int
+    manager_id: Optional[int] = None
+    is_active: str
+    created_at: datetime
+    updated_at: datetime
+    member_count: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AssignmentGroupMemberCreate(BaseModel):
+    group_id: int
+    user_id: int
+
+
+class AssignmentGroupMemberResponse(BaseModel):
+    id: int
+    group_id: int
+    user_id: int
+    is_active: str
+    assignment_count: int
+    last_assigned_at: Optional[datetime] = None
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CategoryAssignmentMappingCreate(BaseModel):
+    category: str
+    subcategory: Optional[str] = None
+    group_id: int
+    priority_override: Optional[str] = None
+
+
+class CategoryAssignmentMappingResponse(BaseModel):
+    id: int
+    category: str
+    subcategory: Optional[str] = None
+    group_id: int
+    priority_override: Optional[str] = None
+    group_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# SLA SCHEMAS
+# ============================================================================
+
+class SLADefinitionBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    priority: str
+    category: Optional[str] = None
+    response_time_minutes: int = 60
+    resolution_time_hours: int = 24
+    business_hours_only: str = "true"
+    warning_threshold_percent: int = 80
+
+
+class SLADefinitionCreate(SLADefinitionBase):
+    pass
+
+
+class SLADefinitionResponse(SLADefinitionBase):
+    id: int
+    is_active: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TicketSLAResponse(BaseModel):
+    id: int
+    ticket_id: int
+    sla_definition_id: int
+    status: str
+    response_due_at: datetime
+    response_met_at: Optional[datetime] = None
+    response_breached: str
+    resolution_due_at: datetime
+    resolution_met_at: Optional[datetime] = None
+    resolution_breached: str
+    warning_sent: str
+    breach_notified: str
+    created_at: datetime
+    updated_at: datetime
+    # Computed fields
+    ticket_number: Optional[str] = None
+    sla_name: Optional[str] = None
+    time_to_response_breach_minutes: Optional[int] = None
+    time_to_resolution_breach_minutes: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SLABreachResponse(BaseModel):
+    ticket_id: int
+    ticket_number: str
+    title: str
+    priority: str
+    sla_type: str  # response or resolution
+    due_at: datetime
+    breached_at: Optional[datetime] = None
+    minutes_overdue: int
+    assigned_to: Optional[str] = None
+    assignment_group: Optional[str] = None
+
+
+# ============================================================================
+# NOTIFICATION SCHEMAS
+# ============================================================================
+
+class NotificationBase(BaseModel):
+    notification_type: str
+    subject: str
+    message: str
+    recipient_email: Optional[str] = None
+    webhook_url: Optional[str] = None
+
+
+class NotificationCreate(NotificationBase):
+    recipient_id: Optional[int] = None
+    recipient_group_id: Optional[int] = None
+    ticket_id: Optional[int] = None
+    sla_id: Optional[int] = None
+    webhook_payload: Optional[str] = None
+
+
+class NotificationResponse(NotificationBase):
+    id: int
+    status: str
+    recipient_id: Optional[int] = None
+    recipient_group_id: Optional[int] = None
+    ticket_id: Optional[int] = None
+    sla_id: Optional[int] = None
+    sent_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    retry_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
+# AUTO-CREATE TICKET SCHEMAS
+# ============================================================================
+
+class AutoCreateTicketRequest(BaseModel):
+    """Request schema for auto-creating tickets from system events"""
+    event_type: str
+    source_system: str
+    title: str
+    description: Optional[str] = None
+    category: str
+    subcategory: Optional[str] = None
+    priority: str = "medium"
+    assignment_group: str
+    ticket_type: str = "incident"
+    sla_hours: int = 24
+    affected_user: Optional[str] = None
+    affected_ci: Optional[str] = None
+    metadata: Optional[dict] = None
+    requires_approval: bool = False
+    auto_assign: bool = True
+    event_id: Optional[str] = None
+    callback_url: Optional[str] = None
+
+
+class AutoCreateTicketResponse(BaseModel):
+    """Response schema for auto-created tickets"""
+    ticket_id: int
+    ticket_number: str
+    title: str
+    category: str
+    subcategory: Optional[str] = None
+    priority: str
+    status: str
+    assignment_group: str
+    assigned_to_id: Optional[int] = None
+    assigned_to_name: Optional[str] = None
+    sla_response_due: Optional[datetime] = None
+    sla_resolution_due: Optional[datetime] = None
+    created_at: datetime
+    event_id: Optional[str] = None
+    message: str
+
+    class Config:
+        from_attributes = True

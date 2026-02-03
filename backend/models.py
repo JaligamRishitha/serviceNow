@@ -146,3 +146,178 @@ class Approval(Base):
 
     ticket = relationship("Ticket", back_populates="approvals")
     approver = relationship("User", back_populates="pending_approvals", foreign_keys=[approver_id])
+
+
+# ============================================================================
+# ASSIGNMENT GROUP MODELS
+# ============================================================================
+
+class AssignmentGroup(Base):
+    """Groups that handle specific ticket categories"""
+    __tablename__ = "assignment_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    email = Column(String, nullable=True)
+    manager_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    is_active = Column(String, default="true")  # Using String for SQLite compatibility
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    manager = relationship("User", foreign_keys=[manager_id])
+    members = relationship("AssignmentGroupMember", back_populates="group")
+    category_mappings = relationship("CategoryAssignmentMapping", back_populates="group")
+
+
+class AssignmentGroupMember(Base):
+    """Users belonging to assignment groups"""
+    __tablename__ = "assignment_group_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("assignment_groups.id"))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    is_active = Column(String, default="true")
+    assignment_count = Column(Integer, default=0)  # For round-robin tracking
+    last_assigned_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    group = relationship("AssignmentGroup", back_populates="members")
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class CategoryAssignmentMapping(Base):
+    """Maps ticket categories to assignment groups"""
+    __tablename__ = "category_assignment_mappings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String, index=True)
+    subcategory = Column(String, nullable=True)
+    group_id = Column(Integer, ForeignKey("assignment_groups.id"))
+    priority_override = Column(String, nullable=True)  # Override default priority for this category
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    group = relationship("AssignmentGroup", back_populates="category_mappings")
+
+
+# ============================================================================
+# SLA MODELS
+# ============================================================================
+
+class SLAStatus(str, enum.Enum):
+    active = "active"
+    paused = "paused"
+    breached = "breached"
+    achieved = "achieved"
+    cancelled = "cancelled"
+
+
+class SLADefinition(Base):
+    """SLA rules per priority and category"""
+    __tablename__ = "sla_definitions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    priority = Column(String, index=True)  # critical, high, medium, low
+    category = Column(String, nullable=True)  # Optional category-specific SLA
+    response_time_minutes = Column(Integer, default=60)
+    resolution_time_hours = Column(Integer, default=24)
+    business_hours_only = Column(String, default="true")  # String for SQLite compatibility
+    warning_threshold_percent = Column(Integer, default=80)  # Send warning at 80% elapsed
+    is_active = Column(String, default="true")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TicketSLA(Base):
+    """Active SLA timer for each ticket"""
+    __tablename__ = "ticket_slas"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), index=True)
+    sla_definition_id = Column(Integer, ForeignKey("sla_definitions.id"))
+    status = Column(Enum(SLAStatus), default=SLAStatus.active)
+
+    # Response SLA
+    response_due_at = Column(DateTime)
+    response_met_at = Column(DateTime, nullable=True)
+    response_breached = Column(String, default="false")
+
+    # Resolution SLA
+    resolution_due_at = Column(DateTime)
+    resolution_met_at = Column(DateTime, nullable=True)
+    resolution_breached = Column(String, default="false")
+
+    # Tracking
+    pause_start_at = Column(DateTime, nullable=True)
+    total_pause_minutes = Column(Integer, default=0)
+    warning_sent = Column(String, default="false")
+    breach_notified = Column(String, default="false")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    ticket = relationship("Ticket", foreign_keys=[ticket_id])
+    sla_definition = relationship("SLADefinition", foreign_keys=[sla_definition_id])
+
+
+# ============================================================================
+# NOTIFICATION MODELS
+# ============================================================================
+
+class NotificationType(str, enum.Enum):
+    sla_warning = "sla_warning"
+    sla_breach = "sla_breach"
+    ticket_assigned = "ticket_assigned"
+    ticket_updated = "ticket_updated"
+    ticket_resolved = "ticket_resolved"
+    approval_required = "approval_required"
+    approval_completed = "approval_completed"
+
+
+class NotificationStatus(str, enum.Enum):
+    pending = "pending"
+    sent = "sent"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class Notification(Base):
+    """Notification log and queue"""
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    notification_type = Column(Enum(NotificationType))
+    status = Column(Enum(NotificationStatus), default=NotificationStatus.pending)
+
+    # Target
+    recipient_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    recipient_email = Column(String, nullable=True)
+    recipient_group_id = Column(Integer, ForeignKey("assignment_groups.id"), nullable=True)
+
+    # Content
+    subject = Column(String)
+    message = Column(Text)
+
+    # Reference
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=True)
+    sla_id = Column(Integer, ForeignKey("ticket_slas.id"), nullable=True)
+
+    # Webhook callback (for MuleSoft)
+    webhook_url = Column(String, nullable=True)
+    webhook_payload = Column(Text, nullable=True)
+    webhook_response = Column(Text, nullable=True)
+
+    # Tracking
+    sent_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, default=0)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    recipient = relationship("User", foreign_keys=[recipient_id])
+    recipient_group = relationship("AssignmentGroup", foreign_keys=[recipient_group_id])
+    ticket = relationship("Ticket", foreign_keys=[ticket_id])
+    sla = relationship("TicketSLA", foreign_keys=[sla_id])
