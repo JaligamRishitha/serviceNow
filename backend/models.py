@@ -128,6 +128,11 @@ class Ticket(Base):
     # ServiceNow integration fields
     servicenow_sys_id = Column(String, nullable=True, index=True)
     servicenow_number = Column(String, nullable=True, index=True)
+    # Salesforce integration fields
+    correlation_id = Column(String, nullable=True, index=True)
+    source_system = Column(String, nullable=True)  # e.g., "Salesforce"
+    source_request_id = Column(String, nullable=True)  # e.g., "1" from Salesforce
+    source_request_type = Column(String, nullable=True)  # e.g., "Service Appointment"
 
     requester = relationship("User", back_populates="submitted_tickets", foreign_keys=[requester_id])
     assigned_to = relationship("User", back_populates="assigned_tickets", foreign_keys=[assigned_to_id])

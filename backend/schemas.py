@@ -82,7 +82,11 @@ class TicketBase(BaseModel):
     estimated_cost: Optional[str] = None
 
 class TicketCreate(TicketBase):
-    pass
+    # Salesforce integration fields (optional)
+    correlation_id: Optional[str] = None
+    source_system: Optional[str] = None
+    source_request_id: Optional[str] = None
+    source_request_type: Optional[str] = None
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
@@ -98,6 +102,10 @@ class TicketResponse(TicketBase):
     status: TicketStatus
     requester_id: int
     assigned_to_id: Optional[int] = None
+    correlation_id: Optional[str] = None
+    source_system: Optional[str] = None
+    source_request_id: Optional[str] = None
+    source_request_type: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     due_date: Optional[datetime] = None

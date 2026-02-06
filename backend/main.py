@@ -248,7 +248,12 @@ def create_ticket(ticket: TicketCreate, db: Session = Depends(get_db), current_u
         urgency=ticket.urgency,
         business_justification=ticket.business_justification,
         estimated_cost=ticket.estimated_cost,
-        requester_id=current_user.id
+        requester_id=current_user.id,
+        # Salesforce integration fields
+        correlation_id=ticket.correlation_id,
+        source_system=ticket.source_system,
+        source_request_id=ticket.source_request_id,
+        source_request_type=ticket.source_request_type
     )
     
     db.add(db_ticket)
@@ -343,6 +348,27 @@ def read_ticket_by_number(ticket_number: str, db: Session = Depends(get_db), cur
 
     return ticket
 
+
+@app.get("/tickets/by-correlation/{correlation_id}", response_model=TicketResponse)
+def read_ticket_by_correlation(correlation_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get a specific ticket by correlation ID (for Salesforce tracking)"""
+    ticket = db.query(Ticket).filter(Ticket.correlation_id == correlation_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail=f"Ticket not found with correlation ID: {correlation_id}")
+
+    # Check if user can access this ticket
+    if current_user.role == "user" and ticket.requester_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Add names
+    if ticket.requester:
+        ticket.requester_name = ticket.requester.full_name
+    if ticket.assigned_to:
+        ticket.assigned_to_name = ticket.assigned_to.full_name
+
+    return ticket
+
+
 @app.put("/tickets/{ticket_id}", response_model=TicketResponse)
 async def update_ticket(
     ticket_id: int,
@@ -414,7 +440,8 @@ def read_approvals(
 
 async def notify_mulesoft_approval_status(ticket_number: str, status: str, approval_id: int, comments: str = None):
     """Notify MuleSoft about approval status change"""
-    mulesoft_url = os.getenv("MULESOFT_BASE_URL", "http://149.102.158.71:8091")
+    # Use MuleSoft Platform Backend (port 4797), not MCP (port 8091)
+    mulesoft_url = os.getenv("MULESOFT_PLATFORM_URL", "http://149.102.158.71:4797")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             payload = {
@@ -425,16 +452,16 @@ async def notify_mulesoft_approval_status(ticket_number: str, status: str, appro
                 "timestamp": datetime.utcnow().isoformat() + "Z",
                 "source": "servicenow"
             }
-            # Try to notify MuleSoft about the approval status change
+            # Send to the correct MuleSoft webhook endpoint
             response = await client.post(
-                f"{mulesoft_url}/api/ticket-approval",
+                f"{mulesoft_url}/api/webhooks/servicenow/approval-update",
                 json=payload,
                 headers={"Content-Type": "application/json"}
             )
-            print(f"MuleSoft notification sent: {response.status_code}")
+            print(f"✅ MuleSoft webhook sent: {response.status_code} - Status: {status} for ticket {ticket_number}")
             return response.status_code in [200, 201, 202]
     except Exception as e:
-        print(f"Failed to notify MuleSoft: {e}")
+        print(f"❌ Failed to notify MuleSoft: {e}")
         return False
 
 
