@@ -13,6 +13,10 @@ import MyTickets from './components/MyTickets';
 import PasswordResetForm from './components/PasswordResetForm';
 import ProblemReportForm from './components/ProblemReportForm';
 import BusinessAppForm from './components/BusinessAppForm';
+import SLADashboard from './components/SLADashboard';
+import AssignmentGroups from './components/AssignmentGroups';
+import Notifications from './components/Notifications';
+import SLADefinitions from './components/SLADefinitions';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 
 function AppContent() {
@@ -47,6 +51,10 @@ function AppContent() {
           <Route path="/password-reset" element={<PasswordResetForm />} />
           <Route path="/problem-report" element={<ProblemReportForm />} />
           <Route path="/business-app-help" element={<BusinessAppForm />} />
+          <Route path="/sla-dashboard" element={<SLADashboard />} />
+          <Route path="/assignment-groups" element={<AssignmentGroups />} />
+          <Route path="/notifications" element={<Notifications />} />
+          <Route path="/sla-definitions" element={<SLADefinitions />} />
         </Routes>
       </Box>
     </Box>

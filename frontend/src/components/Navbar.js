@@ -110,10 +110,11 @@ const Navbar = () => {
           >
             <MenuItem onClick={() => handleNavigation('/dashboard')}>Dashboard</MenuItem>
             <MenuItem onClick={() => handleNavigation('/')}>Home</MenuItem>
-            <MenuItem onClick={handleClose}>My Work</MenuItem>
-            <MenuItem onClick={handleClose}>My Groups</MenuItem>
+            <MenuItem onClick={() => handleNavigation('/sla-dashboard')}>SLA Dashboard</MenuItem>
+            <MenuItem onClick={() => handleNavigation('/notifications')}>Notifications</MenuItem>
             <Divider />
-            <MenuItem onClick={handleClose}>Administration</MenuItem>
+            <MenuItem onClick={() => handleNavigation('/sla-definitions')}>SLA Definitions</MenuItem>
+            <MenuItem onClick={() => handleNavigation('/assignment-groups')}>Assignment Groups</MenuItem>
           </Menu>
 
           <Button
